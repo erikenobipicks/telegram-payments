@@ -32,13 +32,18 @@ PRECIO_GOLES = "20€"
 PRECIO_CORNERS = "20€"
 PRECIO_COMBO = "30€"
 
-BIZUM = "660426660"
+BIZUM = "688946111"
 
+# STRIPE
 STRIPE_GOLES = "https://buy.stripe.com/aFa8wObuQ9MbdgA00x08g01"
 STRIPE_CORNERS = "https://buy.stripe.com/bJe3cugPaf6vdgA5kR08g02"
 STRIPE_COMBO = "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
 
+# PAYPAL
 PAYPAL_LINK = "https://paypal.me/erikenobi"
+
+# REVOLUT
+REVOLUT_LINK = "https://revolut.me/ericblasco9"
 
 PLAN_DAYS = 30
 INVITE_EXPIRY_HOURS = 1
@@ -155,42 +160,36 @@ def volver_markup():
 
 
 def pago_markup(plan: str) -> InlineKeyboardMarkup:
+
     if plan == "goles":
         keyboard = [
             [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=STRIPE_GOLES)],
             [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/20")],
             [InlineKeyboardButton("📲 Pagar con Bizum", callback_data="bizum:goles")],
+            [InlineKeyboardButton("🟣 Pagar con Revolut", callback_data="revolut:goles")],
             [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
         ]
+
     elif plan == "corners":
         keyboard = [
             [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=STRIPE_CORNERS)],
             [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/20")],
             [InlineKeyboardButton("📲 Pagar con Bizum", callback_data="bizum:corners")],
+            [InlineKeyboardButton("🟣 Pagar con Revolut", callback_data="revolut:corners")],
             [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
         ]
+
     elif plan == "combo":
         keyboard = [
             [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=STRIPE_COMBO)],
             [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/30")],
             [InlineKeyboardButton("📲 Pagar con Bizum", callback_data="bizum:combo")],
+            [InlineKeyboardButton("🟣 Pagar con Revolut", callback_data="revolut:combo")],
             [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
         ]
     else:
         keyboard = [[InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")]]
 
-    return InlineKeyboardMarkup(keyboard)
-
-
-def admin_approval_markup(user_id: int) -> InlineKeyboardMarkup:
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ GOLES", callback_data=f"approve:goles:{user_id}"),
-            InlineKeyboardButton("✅ CORNERS", callback_data=f"approve:corners:{user_id}"),
-        ],
-        [InlineKeyboardButton("🔥 COMBO", callback_data=f"approve:combo:{user_id}")],
-        [InlineKeyboardButton("❌ RECHAZAR", callback_data=f"reject:{user_id}")],
-    ]
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -333,14 +332,26 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
     await query.answer()
 
     plan = query.data
     user = query.from_user
 
-    if user and plan in ("goles", "corners", "combo"):
-        upsert_pending_payment(user.id, user.username, user.full_name, plan)
+    if plan in ("goles", "corners", "combo"):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO pending_payments (telegram_user_id, username, full_name, plan, created_at)
+                    VALUES (%s, %s, %s, %s, NOW())
+                    ON CONFLICT (telegram_user_id)
+                    DO UPDATE SET
+                        username = EXCLUDED.username,
+                        full_name = EXCLUDED.full_name,
+                        plan = EXCLUDED.plan,
+                        created_at = NOW();
+                """, (user.id, user.username, user.full_name, plan))
 
     if plan == "menu":
         texto = (
@@ -349,75 +360,95 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "con opción de acceso combinado.\n\n"
             "Selecciona una opción:"
         )
+
         await query.edit_message_text(
             texto,
             reply_markup=menu_markup(),
-            parse_mode="Markdown",
+            parse_mode="Markdown"
         )
         return
 
-    if plan == "info":
+    elif plan == "info":
+
         texto = (
             "ℹ️ *Cómo funciona*\n\n"
             "Este servicio ofrece alertas basadas en análisis estadístico "
             "y seguimiento de partidos en tiempo real.\n\n"
+
             "⚽ *GOLES*\n"
             "Incluye alertas de gol en directo y también selecciones "
             "prepartido de over 2.5 goles.\n\n"
+
             "⛳ *CORNERS*\n"
             "Alertas especializadas en mercados de córners en vivo.\n\n"
+
             "🔥 *COMBO*\n"
             "Acceso completo a GOLES + CORNERS.\n\n"
+
+            "💳 *Métodos de pago disponibles*\n"
+            "Stripe · PayPal · Bizum · Revolut\n\n"
+
             "💳 El acceso premium se activa tras validar el pago.\n\n"
+
             "⚠️ *Aviso de responsabilidad*\n"
             "Este servicio es únicamente informativo. "
             "Cada usuario es responsable de sus propias decisiones."
         )
+
         await query.edit_message_text(
             texto,
             reply_markup=volver_markup(),
-            parse_mode="Markdown",
+            parse_mode="Markdown"
         )
         return
 
-    if plan == "stats":
+    elif plan == "stats":
+
         texto = (
             "📊 *Rendimiento estimado del servicio*\n\n"
+
             "⚽ *GOLES*\n"
             "Acierto estimado actual: *+70%*\n"
             "Incluye alertas de gol en directo y prepartido over 2.5.\n\n"
+
             "⛳ *CORNERS*\n"
             "Acierto estimado actual: *+80%*\n"
             "Alertas en vivo basadas en estadísticas y momentum.\n\n"
+
             "🔥 *COMBO*\n"
             "Rendimiento estimado combinado: *+75%*\n"
             "Acceso completo a GOLES + CORNERS.\n\n"
+
             "⚠️ *Aviso importante*\n"
-            "Estos porcentajes son orientativos y pueden variar según el volumen de alertas, "
-            "el momento de la temporada y las condiciones del mercado.\n\n"
+            "Estos porcentajes son orientativos y pueden variar según el volumen "
+            "de alertas, el momento de la temporada y las condiciones del mercado.\n\n"
+
             "Este servicio es únicamente informativo. Cada usuario es responsable "
             "de sus propias decisiones."
         )
+
         await query.edit_message_text(
             texto,
             reply_markup=volver_markup(),
-            parse_mode="Markdown",
+            parse_mode="Markdown"
         )
         return
 
-    if plan == "free":
+    elif plan == "free":
         keyboard = [
             [InlineKeyboardButton("Entrar al canal FREE", url=LINK_FREE)],
-            [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
+            [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")]
         ]
+
         await query.edit_message_text(
             "🆓 *Canal FREE*\n\nAquí puedes acceder al canal gratuito.",
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
+            parse_mode="Markdown"
         )
         return
 
-    if plan == "goles":
+    elif plan == "goles":
+
         texto = (
             f"⚽ *PLAN GOLES | +70% estimado*\n\n"
             f"Precio: *{PRECIO_GOLES}*\n\n"
@@ -425,16 +456,18 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Alertas de gol en directo\n"
             "• Selecciones prepartido over 2.5\n"
             "• Información estadística del partido\n\n"
-            "Selecciona método de pago:"
+            "Selecciona tu método de pago preferido:"
         )
+
         await query.edit_message_text(
             texto,
             reply_markup=pago_markup("goles"),
-            parse_mode="Markdown",
+            parse_mode="Markdown"
         )
         return
 
-    if plan == "corners":
+    elif plan == "corners":
+
         texto = (
             f"⛳ *PLAN CORNERS | +80% estimado*\n\n"
             f"Precio: *{PRECIO_CORNERS}*\n\n"
@@ -442,16 +475,18 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Alertas especializadas en córners\n"
             "• Datos de momentum y presión ofensiva\n"
             "• Estadísticas del partido en vivo\n\n"
-            "Selecciona método de pago:"
+            "Selecciona tu método de pago preferido:"
         )
+
         await query.edit_message_text(
             texto,
             reply_markup=pago_markup("corners"),
-            parse_mode="Markdown",
+            parse_mode="Markdown"
         )
         return
 
-    if plan == "combo":
+    elif plan == "combo":
+
         texto = (
             f"🔥 *PLAN COMBO | +75% estimado*\n\n"
             f"Precio: *{PRECIO_COMBO}*\n\n"
@@ -460,17 +495,20 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⛳ CORNERS\n\n"
             "Perfecto para poder seguir ambos tipos de alertas y elegir "
             "qué consumir según el volumen del día.\n\n"
-            "Selecciona método de pago:"
+            "Selecciona tu método de pago preferido:"
         )
+
         await query.edit_message_text(
             texto,
             reply_markup=pago_markup("combo"),
-            parse_mode="Markdown",
+            parse_mode="Markdown"
         )
         return
 
-    if plan.startswith("bizum:"):
+    elif plan.startswith("bizum:"):
+
         _, plan_real = plan.split(":")
+
         texto = (
             f"📲 *Pago por Bizum*\n\n"
             f"Plan seleccionado: *{plan_real.upper()}*\n"
@@ -478,10 +516,40 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Realiza el pago y envía el comprobante en este chat.\n"
             "Una vez validado recibirás el acceso automáticamente."
         )
+
         await query.edit_message_text(
             texto,
             reply_markup=volver_markup(),
-            parse_mode="Markdown",
+            parse_mode="Markdown"
+        )
+        return
+
+    elif plan.startswith("revolut:"):
+
+        _, plan_real = plan.split(":")
+
+        if plan_real == "goles":
+            importe = PRECIO_GOLES
+        elif plan_real == "corners":
+            importe = PRECIO_CORNERS
+        elif plan_real == "combo":
+            importe = PRECIO_COMBO
+        else:
+            importe = "consultar"
+
+        texto = (
+            f"🟣 *Pago por Revolut*\n\n"
+            f"Plan seleccionado: *{plan_real.upper()}*\n"
+            f"Importe: *{importe}*\n\n"
+            f"Enlace de pago:\n{REVOLUT_LINK}\n\n"
+            "Realiza el pago y envía el comprobante en este chat.\n"
+            "Una vez validado recibirás el acceso automáticamente."
+        )
+
+        await query.edit_message_text(
+            texto,
+            reply_markup=volver_markup(),
+            parse_mode="Markdown"
         )
         return
 
