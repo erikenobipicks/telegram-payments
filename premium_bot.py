@@ -193,6 +193,22 @@ def pago_markup(plan: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+def admin_approval_markup(user_id: int) -> InlineKeyboardMarkup:
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Aprobar GOLES", callback_data=f"approve:goles:{user_id}"),
+            InlineKeyboardButton("✅ Aprobar CORNERS", callback_data=f"approve:corners:{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("✅ Aprobar COMBO", callback_data=f"approve:combo:{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("❌ Rechazar", callback_data=f"reject:{user_id}")
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def upsert_pending_payment(user_id: int, username: str | None, full_name: str, plan: str):
     with get_conn() as conn:
         with conn.cursor() as cur:
