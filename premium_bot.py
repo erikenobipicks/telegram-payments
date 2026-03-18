@@ -1,20 +1,26 @@
 import os
-import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+import psycopg
+from psycopg.rows import dict_row
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
-    CommandHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
+# ==============================
+# CONFIG
+# ==============================
+
 TOKEN = os.getenv("BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-app = ApplicationBuilder().token(TOKEN).build()
-
+# PON TU USER ID REAL
 ADMIN_IDS = [9330181]
 
 CANAL_CORNERS_ID = -1003895151594
@@ -28,147 +34,73 @@ PRECIO_COMBO = "30€"
 
 BIZUM = "660426660"
 
-# STRIPE
 STRIPE_GOLES = "https://buy.stripe.com/aFa8wObuQ9MbdgA00x08g01"
 STRIPE_CORNERS = "https://buy.stripe.com/bJe3cugPaf6vdgA5kR08g02"
 STRIPE_COMBO = "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
 
-# PAYPAL
 PAYPAL_LINK = "https://paypal.me/erikenobi"
 
-DATA_FILE = "premium_users.json"
-PENDING_FILE = "premium_pending.json"
-
 PLAN_DAYS = 30
+INVITE_EXPIRY_HOURS = 1
+CHECK_EXPIRATIONS_EVERY_SECONDS = 43200  # 12h
 
 
-def pago_markup(plan: str):
+# ==============================
+# DB
+# ==============================
 
-    if plan == "goles":
-        keyboard = [
-            [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=STRIPE_GOLES)],
-            [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/20")],
-            [InlineKeyboardButton("📲 Pagar con Bizum", callback_data="bizum:goles")],
-            [InlineKeyboardButton("⬅️ Volver", callback_data="menu")]
-        ]
-
-    elif plan == "corners":
-        keyboard = [
-            [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=STRIPE_CORNERS)],
-            [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/20")],
-            [InlineKeyboardButton("📲 Pagar con Bizum", callback_data="bizum:corners")],
-            [InlineKeyboardButton("⬅️ Volver", callback_data="menu")]
-        ]
-
-    elif plan == "combo":
-        keyboard = [
-            [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=STRIPE_COMBO)],
-            [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/30")],
-            [InlineKeyboardButton("📲 Pagar con Bizum", callback_data="bizum:combo")],
-            [InlineKeyboardButton("⬅️ Volver", callback_data="menu")]
-        ]
-
-    return InlineKeyboardMarkup(keyboard)
+def get_conn():
+    if not DATABASE_URL:
+        raise ValueError("Falta DATABASE_URL en variables de entorno.")
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
-def now_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def init_db():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    telegram_user_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    full_name TEXT,
+                    plan TEXT NOT NULL,
+                    fecha_inicio DATE NOT NULL,
+                    fecha_fin DATE NOT NULL,
+                    estado TEXT NOT NULL DEFAULT 'activo',
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_payments (
+                    telegram_user_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    full_name TEXT,
+                    plan TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+                );
+                """
+            )
 
 
-def today_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+# ==============================
+# UTILS
+# ==============================
+
+def today_date():
+    return datetime.now().date()
 
 
-def load_json(path: str, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return default
-    except Exception as e:
-        print(f"Error cargando {path}: {e}")
-        return default
+def now_utc():
+    return datetime.now(timezone.utc)
 
 
-def save_json(path: str, data):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Error guardando {path}: {e}")
+def parse_date(date_str: str):
+    return datetime.strptime(str(date_str), "%Y-%m-%d").date()
 
-
-USERS_DB = load_json(DATA_FILE, {})
-PENDING_DB = load_json(PENDING_FILE, {})
-
-
-def save_all():
-    save_json(DATA_FILE, USERS_DB)
-    save_json(PENDING_FILE, PENDING_DB)
-
-
-def menu_markup() -> InlineKeyboardMarkup:
-    keyboard = [
-        [
-            InlineKeyboardButton("ℹ️ Info", callback_data="info"),
-            InlineKeyboardButton("📊 Stats", callback_data="stats"),
-        ],
-        [
-            InlineKeyboardButton("💬 Contacto", url="https://t.me/erikenobi")
-        ],
-        [
-            InlineKeyboardButton("🆓 FREE", callback_data="free")
-        ],
-        [
-            InlineKeyboardButton("⚽ GOLES | +70%", callback_data="goles"),
-            InlineKeyboardButton("⛳ CORNERS | +80%", callback_data="corners"),
-        ],
-        [
-            InlineKeyboardButton("🔥 COMBO | +75%", callback_data="combo")
-        ],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-def pago_markup(plan: str) -> InlineKeyboardMarkup:
-
-    if plan == "goles":
-        keyboard = [
-            [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=STRIPE_GOLES)],
-            [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/20")],
-            [InlineKeyboardButton("📲 Pagar con Bizum", callback_data="bizum:goles")],
-            [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
-        ]
-
-    elif plan == "corners":
-        keyboard = [
-            [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=STRIPE_CORNERS)],
-            [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/20")],
-            [InlineKeyboardButton("📲 Pagar con Bizum", callback_data="bizum:corners")],
-            [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
-        ]
-
-    elif plan == "combo":
-        keyboard = [
-            [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=STRIPE_COMBO)],
-            [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/30")],
-            [InlineKeyboardButton("📲 Pagar con Bizum", callback_data="bizum:combo")],
-            [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
-        ]
-    else:
-        keyboard = [[InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")]]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-def volver_markup():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")]
-    ])
-
-
-def parse_date(date_str: str) -> datetime:
-    return datetime.strptime(date_str, "%Y-%m-%d")
 
 def get_plan_channels(plan: str):
     if plan == "goles":
@@ -182,6 +114,7 @@ def get_plan_channels(plan: str):
         ]
     return []
 
+
 async def get_plan_links(context: ContextTypes.DEFAULT_TYPE, plan: str):
     canales = get_plan_channels(plan)
     enlaces = []
@@ -191,34 +124,182 @@ async def get_plan_links(context: ContextTypes.DEFAULT_TYPE, plan: str):
             chat_id=chat_id,
             name=f"{plan}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
             member_limit=1,
-            expire_date=datetime.now() + timedelta(hours=1)
+            expire_date=now_utc() + timedelta(hours=INVITE_EXPIRY_HOURS),
         )
         enlaces.append((titulo, invite.invite_link))
 
     return enlaces
 
 
-def extend_subscription(user_id: str, plan: str):
-    today = datetime.now().date()
-    record = USERS_DB.get(user_id)
+def menu_markup() -> InlineKeyboardMarkup:
+    keyboard = [
+        [
+            InlineKeyboardButton("ℹ️ Info", callback_data="info"),
+            InlineKeyboardButton("📊 Stats", callback_data="stats"),
+        ],
+        [InlineKeyboardButton("💬 Contacto", url="https://t.me/erikenobi")],
+        [InlineKeyboardButton("🆓 FREE", callback_data="free")],
+        [
+            InlineKeyboardButton("⚽ GOLES | +70%", callback_data="goles"),
+            InlineKeyboardButton("⛳ CORNERS | +80%", callback_data="corners"),
+        ],
+        [InlineKeyboardButton("🔥 COMBO | +75%", callback_data="combo")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-    if record:
-        old_expiry = parse_date(record["fecha_fin"]).date()
-        base_date = old_expiry if old_expiry >= today else today
-        new_expiry = base_date + timedelta(days=PLAN_DAYS)
+
+def volver_markup():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")]]
+    )
+
+
+def pago_markup(plan: str) -> InlineKeyboardMarkup:
+    if plan == "goles":
+        keyboard = [
+            [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=STRIPE_GOLES)],
+            [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/20")],
+            [InlineKeyboardButton("📲 Pagar con Bizum", callback_data="bizum:goles")],
+            [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
+        ]
+    elif plan == "corners":
+        keyboard = [
+            [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=STRIPE_CORNERS)],
+            [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/20")],
+            [InlineKeyboardButton("📲 Pagar con Bizum", callback_data="bizum:corners")],
+            [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
+        ]
+    elif plan == "combo":
+        keyboard = [
+            [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=STRIPE_COMBO)],
+            [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/30")],
+            [InlineKeyboardButton("📲 Pagar con Bizum", callback_data="bizum:combo")],
+            [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
+        ]
     else:
-        new_expiry = today + timedelta(days=PLAN_DAYS)
+        keyboard = [[InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")]]
 
-    USERS_DB[user_id] = {
-        "plan": plan,
-        "fecha_inicio": today_str(),
-        "fecha_fin": new_expiry.strftime("%Y-%m-%d"),
-        "estado": "activo",
-        "updated_at": now_str(),
-    }
-    save_all()
-    return USERS_DB[user_id]
+    return InlineKeyboardMarkup(keyboard)
 
+
+def admin_approval_markup(user_id: int) -> InlineKeyboardMarkup:
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ GOLES", callback_data=f"approve:goles:{user_id}"),
+            InlineKeyboardButton("✅ CORNERS", callback_data=f"approve:corners:{user_id}"),
+        ],
+        [InlineKeyboardButton("🔥 COMBO", callback_data=f"approve:combo:{user_id}")],
+        [InlineKeyboardButton("❌ RECHAZAR", callback_data=f"reject:{user_id}")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def upsert_pending_payment(user_id: int, username: str | None, full_name: str, plan: str):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO pending_payments (telegram_user_id, username, full_name, plan, created_at)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (telegram_user_id)
+                DO UPDATE SET
+                    username = EXCLUDED.username,
+                    full_name = EXCLUDED.full_name,
+                    plan = EXCLUDED.plan,
+                    created_at = NOW();
+                """,
+                (user_id, username, full_name, plan),
+            )
+
+
+def get_pending_payment(user_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT telegram_user_id, username, full_name, plan, created_at
+                FROM pending_payments
+                WHERE telegram_user_id = %s
+                """,
+                (user_id,),
+            )
+            return cur.fetchone()
+
+
+def delete_pending_payment(user_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM pending_payments
+                WHERE telegram_user_id = %s
+                """,
+                (user_id,),
+            )
+
+
+def extend_subscription(user_id: int, username: str | None, full_name: str, plan: str):
+    today = today_date()
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT fecha_fin
+                FROM users
+                WHERE telegram_user_id = %s
+                """,
+                (user_id,),
+            )
+            existing = cur.fetchone()
+
+            if existing and existing["fecha_fin"]:
+                old_expiry = existing["fecha_fin"]
+                if isinstance(old_expiry, str):
+                    old_expiry = parse_date(old_expiry)
+                base_date = old_expiry if old_expiry >= today else today
+                new_expiry = base_date + timedelta(days=PLAN_DAYS)
+            else:
+                new_expiry = today + timedelta(days=PLAN_DAYS)
+
+            cur.execute(
+                """
+                INSERT INTO users (
+                    telegram_user_id, username, full_name, plan,
+                    fecha_inicio, fecha_fin, estado, created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, 'activo', NOW(), NOW())
+                ON CONFLICT (telegram_user_id)
+                DO UPDATE SET
+                    username = EXCLUDED.username,
+                    full_name = EXCLUDED.full_name,
+                    plan = EXCLUDED.plan,
+                    fecha_inicio = EXCLUDED.fecha_inicio,
+                    fecha_fin = EXCLUDED.fecha_fin,
+                    estado = 'activo',
+                    updated_at = NOW()
+                RETURNING telegram_user_id, username, full_name, plan, fecha_inicio, fecha_fin, estado
+                """,
+                (user_id, username, full_name, plan, today, new_expiry),
+            )
+            return cur.fetchone()
+
+
+async def expulsar_de_canales(context: ContextTypes.DEFAULT_TYPE, user_id: int, plan: str):
+    canales = get_plan_channels(plan)
+
+    for _, chat_id in canales:
+        try:
+            await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+            await context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
+            print(f"✅ Usuario {user_id} expulsado de {chat_id}")
+        except Exception as e:
+            print(f"❌ Error expulsando {user_id} de {chat_id}: {e}")
+
+
+# ==============================
+# USER FLOW
+# ==============================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = (
@@ -227,23 +308,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "con opción de acceso combinado.\n\n"
         "Selecciona una opción:"
     )
-
     await update.message.reply_text(
         texto,
         reply_markup=menu_markup(),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Usa /start para ver los planes.\n"
-        "Si ya has pagado, envía el comprobante aquí."
+        "Si ya has pagado, envía el comprobante en este chat privado."
     )
 
 
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if not user:
+        return
     username = f"@{user.username}" if user.username else "(sin username)"
     await update.message.reply_text(
         f"Tu user_id es: {user.id}\nUsername: {username}"
@@ -251,21 +333,14 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     query = update.callback_query
     await query.answer()
 
     plan = query.data
     user = query.from_user
 
-    if plan in ("goles", "corners", "combo"):
-        PENDING_DB[str(user.id)] = {
-            "plan": plan,
-            "username": user.username,
-            "name": user.full_name,
-            "created_at": now_str(),
-        }
-        save_all()
+    if user and plan in ("goles", "corners", "combo"):
+        upsert_pending_payment(user.id, user.username, user.full_name, plan)
 
     if plan == "menu":
         texto = (
@@ -274,89 +349,75 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "con opción de acceso combinado.\n\n"
             "Selecciona una opción:"
         )
-
         await query.edit_message_text(
             texto,
             reply_markup=menu_markup(),
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
         return
 
-    elif plan == "info":
-
+    if plan == "info":
         texto = (
             "ℹ️ *Cómo funciona*\n\n"
             "Este servicio ofrece alertas basadas en análisis estadístico "
             "y seguimiento de partidos en tiempo real.\n\n"
-
             "⚽ *GOLES*\n"
             "Incluye alertas de gol en directo y también selecciones "
             "prepartido de over 2.5 goles.\n\n"
-
             "⛳ *CORNERS*\n"
             "Alertas especializadas en mercados de córners en vivo.\n\n"
-
             "🔥 *COMBO*\n"
             "Acceso completo a GOLES + CORNERS.\n\n"
-
             "💳 El acceso premium se activa tras validar el pago.\n\n"
-
             "⚠️ *Aviso de responsabilidad*\n"
             "Este servicio es únicamente informativo. "
             "Cada usuario es responsable de sus propias decisiones."
         )
-
         await query.edit_message_text(
             texto,
             reply_markup=volver_markup(),
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
+        return
 
-    elif plan == "stats":
-
+    if plan == "stats":
         texto = (
             "📊 *Rendimiento estimado del servicio*\n\n"
-
             "⚽ *GOLES*\n"
             "Acierto estimado actual: *+70%*\n"
             "Incluye alertas de gol en directo y prepartido over 2.5.\n\n"
-
             "⛳ *CORNERS*\n"
             "Acierto estimado actual: *+80%*\n"
             "Alertas en vivo basadas en estadísticas y momentum.\n\n"
-
             "🔥 *COMBO*\n"
             "Rendimiento estimado combinado: *+75%*\n"
             "Acceso completo a GOLES + CORNERS.\n\n"
-
             "⚠️ *Aviso importante*\n"
             "Estos porcentajes son orientativos y pueden variar según el volumen de alertas, "
             "el momento de la temporada y las condiciones del mercado.\n\n"
-
             "Este servicio es únicamente informativo. Cada usuario es responsable "
             "de sus propias decisiones."
         )
-
         await query.edit_message_text(
             texto,
             reply_markup=volver_markup(),
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
+        return
 
-    elif plan == "free":
+    if plan == "free":
         keyboard = [
             [InlineKeyboardButton("Entrar al canal FREE", url=LINK_FREE)],
-            [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")]
+            [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
         ]
-
         await query.edit_message_text(
             "🆓 *Canal FREE*\n\nAquí puedes acceder al canal gratuito.",
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
+        return
 
-    elif plan == "goles":
-
+    if plan == "goles":
         texto = (
             f"⚽ *PLAN GOLES | +70% estimado*\n\n"
             f"Precio: *{PRECIO_GOLES}*\n\n"
@@ -366,15 +427,14 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Información estadística del partido\n\n"
             "Selecciona método de pago:"
         )
-
         await query.edit_message_text(
             texto,
             reply_markup=pago_markup("goles"),
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
+        return
 
-    elif plan == "corners":
-
+    if plan == "corners":
         texto = (
             f"⛳ *PLAN CORNERS | +80% estimado*\n\n"
             f"Precio: *{PRECIO_CORNERS}*\n\n"
@@ -384,15 +444,14 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Estadísticas del partido en vivo\n\n"
             "Selecciona método de pago:"
         )
-
         await query.edit_message_text(
             texto,
             reply_markup=pago_markup("corners"),
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
+        return
 
-    elif plan == "combo":
-
+    if plan == "combo":
         texto = (
             f"🔥 *PLAN COMBO | +75% estimado*\n\n"
             f"Precio: *{PRECIO_COMBO}*\n\n"
@@ -403,17 +462,15 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "qué consumir según el volumen del día.\n\n"
             "Selecciona método de pago:"
         )
-
         await query.edit_message_text(
             texto,
             reply_markup=pago_markup("combo"),
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
+        return
 
-    elif plan.startswith("bizum:"):
-
+    if plan.startswith("bizum:"):
         _, plan_real = plan.split(":")
-
         texto = (
             f"📲 *Pago por Bizum*\n\n"
             f"Plan seleccionado: *{plan_real.upper()}*\n"
@@ -421,28 +478,37 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Realiza el pago y envía el comprobante en este chat.\n"
             "Una vez validado recibirás el acceso automáticamente."
         )
-
         await query.edit_message_text(
             texto,
             reply_markup=volver_markup(),
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
+        return
 
 
 async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
     user = update.effective_user
-    user_id = str(user.id)
+    chat = update.effective_chat
 
-    if user_id not in PENDING_DB:
-        await update.message.reply_text(
+    if message is None or user is None or chat is None:
+        return
+
+    if chat.type != "private":
+        return
+
+    pending = get_pending_payment(user.id)
+
+    if not pending:
+        await message.reply_text(
             "Antes de enviar el comprobante, usa /start y selecciona un plan."
         )
         return
 
-    plan = PENDING_DB[user_id]["plan"]
+    plan = pending["plan"]
     username = f"@{user.username}" if user.username else "(sin username)"
 
-    await update.message.reply_text(
+    await message.reply_text(
         "Perfecto. He recibido tu comprobante.\n"
         "En cuanto lo revise te enviaré el acceso."
     )
@@ -460,19 +526,21 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(
                 chat_id=admin_id,
                 text=texto_admin,
-                reply_markup=admin_approval_markup(user.id)
+                reply_markup=admin_approval_markup(user.id),
             )
         except Exception as e:
             print(f"Error avisando al admin {admin_id}: {e}")
 
 
-async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==============================
+# ADMIN FLOW
+# ==============================
 
+async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     admin = query.from_user
-
     if admin.id not in ADMIN_IDS:
         await query.edit_message_text("No tienes permisos para esta acción.")
         return
@@ -480,13 +548,7 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
     data = query.data
 
     try:
-
-        # -------------------------
-        # APROBAR PAGO
-        # -------------------------
-
         if data.startswith("approve:"):
-
             parts = data.split(":")
             if len(parts) != 3:
                 await query.edit_message_text("Error en datos del botón.")
@@ -499,16 +561,20 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 await query.edit_message_text("Plan no válido.")
                 return
 
-            if str(user_id_int) not in PENDING_DB:
+            pending = get_pending_payment(user_id_int)
+            if not pending:
                 await query.edit_message_text(
                     f"⚠️ El usuario {user_id_int} ya no está en pendientes."
                 )
                 return
 
-            # renovar o crear suscripción
-            record = extend_subscription(str(user_id_int), plan)
+            record = extend_subscription(
+                user_id=user_id_int,
+                username=pending["username"],
+                full_name=pending["full_name"],
+                plan=plan,
+            )
 
-            # obtener enlaces únicos del plan
             links = await get_plan_links(context, plan)
 
             texto_usuario = (
@@ -522,29 +588,19 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 texto_usuario += f"{title}\n{link}\n\n"
 
             try:
-                await context.bot.send_message(
-                    chat_id=user_id_int,
-                    text=texto_usuario
-                )
+                await context.bot.send_message(chat_id=user_id_int, text=texto_usuario)
             except Exception as e:
                 print(f"Error enviando acceso a {user_id_int}: {e}")
 
-            # eliminar pendiente
-            PENDING_DB.pop(str(user_id_int), None)
-
-            save_all()
+            delete_pending_payment(user_id_int)
 
             await query.edit_message_text(
                 f"✅ Usuario {user_id_int} aprobado para {plan.upper()}.\n"
                 f"Activo hasta {record['fecha_fin']}."
             )
+            return
 
-        # -------------------------
-        # RECHAZAR PAGO
-        # -------------------------
-
-        elif data.startswith("reject:"):
-
+        if data.startswith("reject:"):
             parts = data.split(":")
             if len(parts) != 2:
                 await query.edit_message_text("Error en datos del botón.")
@@ -556,26 +612,19 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             try:
                 await context.bot.send_message(
                     chat_id=user_id_int,
-                    text="❌ No he podido validar el pago. Escríbeme si quieres revisarlo."
+                    text="❌ No he podido validar el pago. Escríbeme si quieres revisarlo.",
                 )
             except Exception as e:
                 print(f"Error avisando rechazo a {user_id_int}: {e}")
 
-            PENDING_DB.pop(str(user_id_int), None)
+            delete_pending_payment(user_id_int)
 
-            save_all()
-
-            await query.edit_message_text(
-                f"❌ Usuario {user_id_int} rechazado."
-            )
+            await query.edit_message_text(f"❌ Usuario {user_id_int} rechazado.")
+            return
 
     except Exception as e:
-
         print(f"Error admin_action_callback: {e}")
-
-        await query.edit_message_text(
-            "⚠️ Ha ocurrido un error procesando la acción."
-        )
+        await query.edit_message_text("⚠️ Ha ocurrido un error procesando la acción.")
 
 
 async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -600,7 +649,17 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Plan no válido. Usa: goles, corners o combo")
         return
 
-    record = extend_subscription(str(target_user_id), plan)
+    pending = get_pending_payment(target_user_id)
+    if not pending:
+        await update.message.reply_text("Ese usuario no está en pendientes.")
+        return
+
+    record = extend_subscription(
+        user_id=target_user_id,
+        username=pending["username"],
+        full_name=pending["full_name"],
+        plan=plan,
+    )
     links = await get_plan_links(context, plan)
 
     texto = (
@@ -615,11 +674,10 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await context.bot.send_message(chat_id=target_user_id, text=texto)
+        delete_pending_payment(target_user_id)
         await update.message.reply_text(
             f"Usuario {target_user_id} aprobado/renovado para {plan} hasta {record['fecha_fin']}."
         )
-        PENDING_DB.pop(str(target_user_id), None)
-        save_all()
     except Exception as e:
         await update.message.reply_text(f"Error enviando acceso: {e}")
 
@@ -644,13 +702,12 @@ async def rechazar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             chat_id=target_user_id,
-            text="No he podido validar el pago. Escríbeme de nuevo si quieres revisarlo."
+            text="No he podido validar el pago. Escríbeme de nuevo si quieres revisarlo.",
         )
     except Exception as e:
         print(f"Error avisando rechazo a {target_user_id}: {e}")
 
-    PENDING_DB.pop(str(target_user_id), None)
-    save_all()
+    delete_pending_payment(target_user_id)
     await update.message.reply_text(f"Usuario {target_user_id} rechazado.")
 
 
@@ -665,15 +722,30 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Uso correcto: /estado user_id")
         return
 
-    user_id = context.args[0]
-    record = USERS_DB.get(user_id)
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El user_id no es válido.")
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT telegram_user_id, plan, fecha_inicio, fecha_fin, estado
+                FROM users
+                WHERE telegram_user_id = %s
+                """,
+                (user_id,),
+            )
+            record = cur.fetchone()
 
     if not record:
         await update.message.reply_text("Ese usuario no tiene suscripción activa.")
         return
 
     await update.message.reply_text(
-        f"Usuario: {user_id}\n"
+        f"Usuario: {record['telegram_user_id']}\n"
         f"Plan: {record['plan']}\n"
         f"Inicio: {record['fecha_inicio']}\n"
         f"Fin: {record['fecha_fin']}\n"
@@ -688,56 +760,244 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No tienes permisos para usar este comando.")
         return
 
-    if not USERS_DB:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT telegram_user_id, plan, estado, fecha_fin
+                FROM users
+                ORDER BY fecha_fin ASC
+                """
+            )
+            rows = cur.fetchall()
+
+    if not rows:
         await update.message.reply_text("No hay usuarios guardados.")
         return
 
     lineas = ["📋 Usuarios activos/guardados:\n"]
-    for user_id, record in USERS_DB.items():
+    for row in rows:
         lineas.append(
-            f"{user_id} | {record['plan']} | {record['estado']} | hasta {record['fecha_fin']}"
+            f"{row['telegram_user_id']} | {row['plan']} | {row['estado']} | hasta {row['fecha_fin']}"
         )
 
-    texto = "\n".join(lineas)
+    await update.message.reply_text("\n".join(lineas)[:4000])
+
+
+async def pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin = update.effective_user
+
+    if admin.id not in ADMIN_IDS:
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT telegram_user_id, username, full_name, plan, created_at
+                FROM pending_payments
+                ORDER BY created_at DESC
+                """
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("No hay pagos pendientes.")
+        return
+
+    lineas = ["📥 Pagos pendientes:\n"]
+    for row in rows:
+        username = f"@{row['username']}" if row["username"] else "(sin username)"
+        lineas.append(
+            f"{row['telegram_user_id']} | {row['full_name']} | {username} | {row['plan']}"
+        )
+
+    await update.message.reply_text("\n".join(lineas)[:4000])
+
+
+async def caducan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin = update.effective_user
+
+    if admin.id not in ADMIN_IDS:
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    today = today_date()
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT telegram_user_id, plan, fecha_fin, estado
+                FROM users
+                WHERE estado = 'activo'
+                ORDER BY fecha_fin ASC
+                """
+            )
+            rows = cur.fetchall()
+
+    lineas = ["⏳ Próximas caducidades:\n"]
+    encontrados = 0
+
+    for row in rows:
+        end_date = row["fecha_fin"]
+        if isinstance(end_date, str):
+            end_date = parse_date(end_date)
+        days_left = (end_date - today).days
+        if 0 <= days_left <= 7:
+            lineas.append(
+                f"{row['telegram_user_id']} | {row['plan']} | {end_date} | faltan {days_left} días"
+            )
+            encontrados += 1
+
+    if encontrados == 0:
+        await update.message.reply_text("No hay caducidades en los próximos 7 días.")
+        return
+
+    await update.message.reply_text("\n".join(lineas)[:4000])
+
+
+async def activos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin = update.effective_user
+
+    if admin.id not in ADMIN_IDS:
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT telegram_user_id, plan, fecha_fin
+                FROM users
+                WHERE estado = 'activo'
+                ORDER BY fecha_fin ASC
+                """
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("No hay usuarios activos.")
+        return
+
+    texto = "✅ Usuarios activos:\n\n"
+    for row in rows:
+        texto += f"{row['telegram_user_id']} | {row['plan']} | hasta {row['fecha_fin']}\n"
+
     await update.message.reply_text(texto[:4000])
 
 
-async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
-    today = datetime.now().date()
+async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin = update.effective_user
 
-    for user_id, record in list(USERS_DB.items()):
+    if admin.id not in ADMIN_IDS:
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("Uso correcto: /expulsar user_id")
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El user_id no es válido.")
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT plan
+                FROM users
+                WHERE telegram_user_id = %s
+                """,
+                (target_user_id,),
+            )
+            record = cur.fetchone()
+
+    if not record:
+        await update.message.reply_text("Ese usuario no está registrado.")
+        return
+
+    await expulsar_de_canales(context, target_user_id, record["plan"])
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET estado = 'caducado', updated_at = NOW()
+                WHERE telegram_user_id = %s
+                """,
+                (target_user_id,),
+            )
+
+    await update.message.reply_text(
+        f"Usuario {target_user_id} expulsado y marcado como caducado."
+    )
+
+
+# ==============================
+# JOBS
+# ==============================
+
+async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
+    today = today_date()
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT telegram_user_id, plan, fecha_fin, estado
+                FROM users
+                """
+            )
+            rows = cur.fetchall()
+
+    for record in rows:
         try:
-            end_date = parse_date(record["fecha_fin"]).date()
+            user_id = record["telegram_user_id"]
+            end_date = record["fecha_fin"]
+            if isinstance(end_date, str):
+                end_date = parse_date(end_date)
+
             days_left = (end_date - today).days
 
-            # 3 días antes
             if days_left == 3 and record["estado"] == "activo":
                 await context.bot.send_message(
                     chat_id=int(user_id),
                     text=(
                         f"⏳ Tu suscripción {record['plan'].upper()} caduca en 3 días "
-                        f"({record['fecha_fin']}).\n"
+                        f"({end_date}).\n"
                         "Cuando renueves, envíame el comprobante aquí."
                     ),
                 )
 
-            # último día
             elif days_left == 0 and record["estado"] == "activo":
                 await context.bot.send_message(
                     chat_id=int(user_id),
                     text=(
                         f"⚠️ Tu suscripción {record['plan'].upper()} caduca hoy "
-                        f"({record['fecha_fin']}).\n"
+                        f"({end_date}).\n"
                         "Si quieres renovar, envíame el comprobante aquí."
                     ),
                 )
 
-            # caducado
             elif days_left < 0 and record["estado"] != "caducado":
-                record["estado"] = "caducado"
-                record["updated_at"] = now_str()
-
                 await expulsar_de_canales(context, int(user_id), record["plan"])
+
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE users
+                            SET estado = 'caducado', updated_at = NOW()
+                            WHERE telegram_user_id = %s
+                            """,
+                            (user_id,),
+                        )
 
                 await context.bot.send_message(
                     chat_id=int(user_id),
@@ -749,42 +1009,24 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE):
                 )
 
         except Exception as e:
-            print(f"Error revisando expiración de {user_id}: {e}")
-
-    save_all()
+            print(f"Error revisando expiración de {record.get('telegram_user_id')}: {e}")
 
 
-async def expulsar_de_canales(context: ContextTypes.DEFAULT_TYPE, user_id: int, plan: str):
-    canales = get_plan_channels(plan)
-
-    for _, chat_id in canales:
-        try:
-            await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
-            await context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
-            print(f"✅ Usuario {user_id} expulsado de {chat_id}")
-        except Exception as e:
-            print(f"❌ Error expulsando {user_id} de {chat_id}: {e}")
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    print(f"⚠️ Error capturado: {context.error}")
 
 
-def admin_approval_markup(user_id: int) -> InlineKeyboardMarkup:
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ GOLES", callback_data=f"approve:goles:{user_id}"),
-            InlineKeyboardButton("✅ CORNERS", callback_data=f"approve:corners:{user_id}"),
-        ],
-        [
-            InlineKeyboardButton("🔥 COMBO", callback_data=f"approve:combo:{user_id}")
-        ],
-        [
-            InlineKeyboardButton("❌ RECHAZAR", callback_data=f"reject:{user_id}")
-        ],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
+# ==============================
+# MAIN
+# ==============================
 
 def main():
     if not TOKEN:
-        raise ValueError("Falta BOT_TOKEN en las variables de entorno.")
+        raise ValueError("Falta BOT_TOKEN en variables de entorno.")
+    if not DATABASE_URL:
+        raise ValueError("Falta DATABASE_URL en variables de entorno.")
+
+    init_db()
 
     app = ApplicationBuilder().token(TOKEN).build()
 
@@ -795,22 +1037,29 @@ def main():
     app.add_handler(CommandHandler("rechazar", rechazar))
     app.add_handler(CommandHandler("estado", estado))
     app.add_handler(CommandHandler("listar", listar))
+    app.add_handler(CommandHandler("pendientes", pendientes))
+    app.add_handler(CommandHandler("caducan", caducan))
+    app.add_handler(CommandHandler("activos", activos))
+    app.add_handler(CommandHandler("expulsar", expulsar))
 
-    # primero callbacks del admin
     app.add_handler(CallbackQueryHandler(admin_action_callback, pattern=r"^(approve:|reject:)"))
-
-    # luego callbacks normales del usuario
     app.add_handler(CallbackQueryHandler(seleccionar_plan))
 
     app.add_handler(
         MessageHandler(
-            (filters.TEXT & ~filters.COMMAND) | filters.PHOTO | filters.Document.ALL,
+            filters.ChatType.PRIVATE
+            & ((filters.TEXT & ~filters.COMMAND) | filters.PHOTO | filters.Document.ALL),
             recibir_comprobante,
         )
     )
 
-    # revisa expiraciones cada 12 horas
-    app.job_queue.run_repeating(check_expirations, interval=43200, first=20)
+    app.add_error_handler(error_handler)
+
+    app.job_queue.run_repeating(
+        check_expirations,
+        interval=CHECK_EXPIRATIONS_EVERY_SECONDS,
+        first=20,
+    )
 
     print("Bot premium funcionando...")
     app.run_polling()
