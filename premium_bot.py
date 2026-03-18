@@ -11,7 +11,9 @@ from telegram.ext import (
     filters,
 )
 
-TOKEN = "TOKEN"
+TOKEN = os.getenv("BOT_TOKEN")
+
+app = ApplicationBuilder().token(TOKEN).build()
 
 ADMIN_IDS = [9330181]
 
