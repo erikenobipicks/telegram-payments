@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -53,6 +54,9 @@ logger = logging.getLogger(__name__)
 TOKEN        = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# DB de solo lectura del bot de picks (para estadísticas reales)
+PICKS_DATABASE_URL = os.getenv("PICKS_DATABASE_URL")
+
 ADMIN_IDS = [9330181]
 
 CANAL_CORNERS_ID = -1003895151594
@@ -78,9 +82,16 @@ CHECK_EXPIRATIONS_EVERY_SECONDS = 43200  # 12h
 
 TIMEZONE = "Europe/Madrid"
 
+# Meses en español para formateo de stats
+_MESES_ES = {
+    "01": "Ene", "02": "Feb", "03": "Mar", "04": "Abr",
+    "05": "May", "06": "Jun", "07": "Jul", "08": "Ago",
+    "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dic",
+}
+
 
 # ==============================
-# DB
+# DB — BOT PREMIUM
 # ==============================
 
 def get_conn():
@@ -118,7 +129,6 @@ def init_db():
                 );
                 """
             )
-            # Tabla para accesos pendientes de recoger por el usuario
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS pending_access (
@@ -132,11 +142,224 @@ def init_db():
 
 
 # ==============================
+# DB — ESTADÍSTICAS REALES (picks DB)
+# ==============================
+
+def get_picks_conn():
+    """Conexión de solo lectura a la DB del bot de picks."""
+    if not PICKS_DATABASE_URL:
+        logger.debug("PICKS_DATABASE_URL no configurada — stats reales no disponibles.")
+        return None
+    try:
+        return psycopg.connect(PICKS_DATABASE_URL, row_factory=dict_row)
+    except Exception as e:
+        logger.error(f"Error conectando a picks DB: {e}")
+        return None
+
+
+def calcular_strike(hits: int, misses: int) -> float:
+    resueltos = hits + misses
+    return round((hits / resueltos) * 100, 1) if resueltos > 0 else 0.0
+
+
+def get_stats_reales() -> dict | None:
+    """
+    Obtiene estadísticas reales del bot de picks:
+      - globales: strike total por tipo_pick
+      - ultimo_mes: stats del mes anterior cerrado
+      - mes_label: "YYYY-MM" del último mes
+      - evolucion: stats agrupadas por mes/tipo de los últimos 6 meses
+    Devuelve None si la conexión falla o no hay datos.
+    """
+    conn = get_picks_conn()
+    if not conn:
+        return None
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+
+                # Stats globales por tipo (solo picks resueltos)
+                cur.execute("""
+                    SELECT
+                        tipo_pick,
+                        COUNT(*)                                              AS total,
+                        SUM(CASE WHEN resultado = 'HIT'  THEN 1 ELSE 0 END) AS hits,
+                        SUM(CASE WHEN resultado = 'MISS' THEN 1 ELSE 0 END) AS misses,
+                        SUM(CASE WHEN resultado = 'VOID' THEN 1 ELSE 0 END) AS voids
+                    FROM picks
+                    WHERE resultado IS NOT NULL
+                    GROUP BY tipo_pick;
+                """)
+                globales = {row["tipo_pick"]: row for row in cur.fetchall()}
+
+                # Último mes cerrado
+                cur.execute("""
+                    SELECT
+                        TO_CHAR(
+                            date_trunc('month', CURRENT_DATE - INTERVAL '1 month'),
+                            'YYYY-MM'
+                        ) AS mes,
+                        tipo_pick,
+                        COUNT(*)                                              AS total,
+                        SUM(CASE WHEN resultado = 'HIT'  THEN 1 ELSE 0 END) AS hits,
+                        SUM(CASE WHEN resultado = 'MISS' THEN 1 ELSE 0 END) AS misses,
+                        SUM(CASE WHEN resultado = 'VOID' THEN 1 ELSE 0 END) AS voids
+                    FROM picks
+                    WHERE resultado IS NOT NULL
+                      AND date_trunc('month', fecha) =
+                          date_trunc('month', CURRENT_DATE - INTERVAL '1 month')
+                    GROUP BY mes, tipo_pick;
+                """)
+                ultimo_mes_rows = cur.fetchall()
+                ultimo_mes  = {row["tipo_pick"]: row for row in ultimo_mes_rows}
+                mes_label   = ultimo_mes_rows[0]["mes"] if ultimo_mes_rows else None
+
+                # Evolución mensual (últimos 6 meses)
+                cur.execute("""
+                    SELECT
+                        TO_CHAR(fecha, 'YYYY-MM') AS mes,
+                        tipo_pick,
+                        COUNT(*)                                              AS total,
+                        SUM(CASE WHEN resultado = 'HIT'  THEN 1 ELSE 0 END) AS hits,
+                        SUM(CASE WHEN resultado = 'MISS' THEN 1 ELSE 0 END) AS misses
+                    FROM picks
+                    WHERE resultado IS NOT NULL
+                      AND fecha >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '5 months')
+                    GROUP BY mes, tipo_pick
+                    ORDER BY mes DESC, tipo_pick;
+                """)
+                evolucion = cur.fetchall()
+
+        return {
+            "globales":   globales,
+            "ultimo_mes": ultimo_mes,
+            "mes_label":  mes_label,
+            "evolucion":  evolucion,
+        }
+
+    except Exception as e:
+        logger.error(f"Error obteniendo stats reales: {e}")
+        return None
+
+
+def _get_strike_tipo(stats: dict | None, tipo: str) -> str | None:
+    """
+    Devuelve el strike del último mes para un tipo_pick ("gol" / "corner").
+    Si no hay datos del último mes, usa el global.
+    Devuelve None si no hay datos en absoluto.
+    """
+    if not stats:
+        return None
+    ultimo_mes = stats.get("ultimo_mes", {})
+    if tipo in ultimo_mes:
+        row = ultimo_mes[tipo]
+        return f"{calcular_strike(row['hits'], row['misses'])}%"
+    globales = stats.get("globales", {})
+    if tipo in globales:
+        row = globales[tipo]
+        return f"{calcular_strike(row['hits'], row['misses'])}%"
+    return None
+
+
+def _formatear_stats_reales(stats: dict) -> str:
+    """
+    Formatea el mensaje de estadísticas reales para el menú del bot premium.
+    Incluye: último mes cerrado, strike global y evolución mensual en tabla.
+    """
+    globales   = stats["globales"]
+    ultimo_mes = stats["ultimo_mes"]
+    mes_label  = stats["mes_label"]
+    evolucion  = stats["evolucion"]
+
+    lineas = ["📊 *Rendimiento real del servicio*\n"]
+
+    # ── Último mes cerrado ──────────────────────────────────────────────
+    if ultimo_mes:
+        if mes_label:
+            mes_nombre = (
+                _MESES_ES.get(mes_label[5:], mes_label[5:]) + " " + mes_label[:4]
+            )
+        else:
+            mes_nombre = "—"
+
+        lineas.append(f"📅 *Último mes cerrado — {mes_nombre}*")
+
+        if "gol" in ultimo_mes:
+            g = ultimo_mes["gol"]
+            s = calcular_strike(g["hits"], g["misses"])
+            lineas.append(f"⚽ Goles: {g['total']} picks | ✅ {g['hits']} HITs | 📈 {s}%")
+
+        if "corner" in ultimo_mes:
+            c = ultimo_mes["corner"]
+            s = calcular_strike(c["hits"], c["misses"])
+            lineas.append(f"🚩 Corners: {c['total']} picks | ✅ {c['hits']} HITs | 📈 {s}%")
+
+        lineas.append("")
+
+    # ── Strike global ───────────────────────────────────────────────────
+    lineas.append("🏆 *Strike acumulado (todos los picks resueltos)*")
+
+    if "gol" in globales:
+        g = globales["gol"]
+        s = calcular_strike(g["hits"], g["misses"])
+        lineas.append(f"⚽ Goles: {g['total']} picks | {s}%")
+
+    if "corner" in globales:
+        c = globales["corner"]
+        s = calcular_strike(c["hits"], c["misses"])
+        lineas.append(f"🚩 Corners: {c['total']} picks | {s}%")
+
+    lineas.append("")
+
+    # ── Evolución mensual ───────────────────────────────────────────────
+    if evolucion:
+        lineas.append("📈 *Evolución — últimos 6 meses*")
+        lineas.append("```")
+        lineas.append(f"{'Mes':<8}  {'Goles':>7}  {'Corners':>9}")
+        lineas.append("─" * 28)
+
+        por_mes: dict[str, dict] = defaultdict(dict)
+        for row in evolucion:
+            por_mes[row["mes"]][row["tipo_pick"]] = row
+
+        for mes_key in sorted(por_mes.keys(), reverse=True):
+            nombre_mes = (
+                _MESES_ES.get(mes_key[5:], mes_key[5:]) + " " + mes_key[2:4]
+            )
+            datos = por_mes[mes_key]
+
+            g_str = "  —  "
+            if "gol" in datos:
+                g = datos["gol"]
+                g_str = f"{calcular_strike(g['hits'], g['misses'])}%"
+
+            c_str = "  —  "
+            if "corner" in datos:
+                c = datos["corner"]
+                c_str = f"{calcular_strike(c['hits'], c['misses'])}%"
+
+            lineas.append(f"{nombre_mes:<8}  {g_str:>7}  {c_str:>9}")
+
+        lineas.append("```")
+        lineas.append("")
+
+    # ── Aviso legal ─────────────────────────────────────────────────────
+    lineas.append(
+        "⚠️ _Porcentajes calculados sobre picks con resultado ya conocido. "
+        "El rendimiento pasado no garantiza resultados futuros. "
+        "Este servicio es únicamente informativo._"
+    )
+
+    return "\n".join(lineas)
+
+
+# ==============================
 # UTILS
 # ==============================
 
 def today_date():
-    """Fecha de hoy en zona horaria Europe/Madrid (evita desfases en servidores UTC)."""
+    """Fecha de hoy en zona horaria Europe/Madrid."""
     return datetime.now(ZoneInfo(TIMEZONE)).date()
 
 
@@ -162,7 +385,6 @@ async def generar_enlaces_acceso(context: ContextTypes.DEFAULT_TYPE, plan: str) 
     """
     Genera enlaces de invitación frescos en el momento de la llamada.
     Cada enlace tiene 1 uso y caduca en INVITE_EXPIRY_HOURS horas.
-    Se llama cuando el USUARIO pulsa 'Obtener acceso', no cuando el admin aprueba.
     """
     canales = get_plan_channels(plan)
     enlaces = []
@@ -183,7 +405,6 @@ async def generar_enlaces_acceso(context: ContextTypes.DEFAULT_TYPE, plan: str) 
 # ==============================
 
 def registrar_acceso_pendiente(user_id: int, plan: str) -> None:
-    """Marca que el usuario tiene un acceso aprobado pendiente de recoger."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -312,10 +533,10 @@ def menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💬 Contacto", url="https://t.me/erikenobi")],
         [InlineKeyboardButton("🆓 FREE", callback_data="free")],
         [
-            InlineKeyboardButton("⚽ GOLES | +70%", callback_data="goles"),
-            InlineKeyboardButton("⛳ CORNERS | +80%", callback_data="corners"),
+            InlineKeyboardButton("⚽ GOLES", callback_data="goles"),
+            InlineKeyboardButton("⛳ CORNERS", callback_data="corners"),
         ],
-        [InlineKeyboardButton("🔥 COMBO | +75%", callback_data="combo")],
+        [InlineKeyboardButton("🔥 COMBO", callback_data="combo")],
     ])
 
 
@@ -352,7 +573,6 @@ def admin_approval_markup(user_id: int) -> InlineKeyboardMarkup:
 
 
 def acceso_listo_markup() -> InlineKeyboardMarkup:
-    """Botón que el usuario pulsa para obtener su enlace de acceso fresco."""
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("🔑 Obtener mi acceso", callback_data="obtener_acceso")]]
     )
@@ -365,7 +585,6 @@ def acceso_listo_markup() -> InlineKeyboardMarkup:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
 
-    # Si tiene acceso pendiente de recoger, se lo recordamos
     if user:
         acceso = get_acceso_pendiente(user.id)
         if acceso:
@@ -406,14 +625,39 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _responder_stats(send_fn, edit: bool = False) -> None:
+    """
+    Función compartida entre el botón 📊 Stats y el comando /stats.
+    send_fn: corrutina que recibe (texto, parse_mode, reply_markup)
+    """
+    stats = get_stats_reales()
+
+    if stats and (stats.get("globales") or stats.get("ultimo_mes")):
+        texto = _formatear_stats_reales(stats)
+    else:
+        texto = (
+            "📊 *Rendimiento del servicio*\n\n"
+            "⚽ *GOLES*\n"
+            "Acierto estimado actual: *+70%*\n"
+            "Incluye alertas de gol en directo y prepartido over 2.5.\n\n"
+            "⛳ *CORNERS*\n"
+            "Acierto estimado actual: *+80%*\n"
+            "Alertas en vivo basadas en estadísticas y momentum.\n\n"
+            "🔥 *COMBO*\n"
+            "Rendimiento estimado combinado: *+75%*\n"
+            "Acceso completo a GOLES + CORNERS.\n\n"
+            "⚠️ _Los datos en tiempo real no están disponibles en este momento. "
+            "Inténtalo más tarde._"
+        )
+
+    await send_fn(texto)
     query = update.callback_query
     await query.answer()
 
     plan = query.data
     user = query.from_user
 
-    # Registrar en pendientes solo cuando el usuario elige un plan de pago
+    # Registrar en pendientes cuando el usuario elige un plan de pago
     if plan in ("goles", "corners", "combo"):
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -465,26 +709,15 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
+    # ── Stats reales ────────────────────────────────────────────────────
     if plan == "stats":
-        await query.edit_message_text(
-            "📊 *Rendimiento estimado del servicio*\n\n"
-            "⚽ *GOLES*\n"
-            "Acierto estimado actual: *+70%*\n"
-            "Incluye alertas de gol en directo y prepartido over 2.5.\n\n"
-            "⛳ *CORNERS*\n"
-            "Acierto estimado actual: *+80%*\n"
-            "Alertas en vivo basadas en estadísticas y momentum.\n\n"
-            "🔥 *COMBO*\n"
-            "Rendimiento estimado combinado: *+75%*\n"
-            "Acceso completo a GOLES + CORNERS.\n\n"
-            "⚠️ *Aviso importante*\n"
-            "Estos porcentajes son orientativos y pueden variar según el volumen "
-            "de alertas, el momento de la temporada y las condiciones del mercado.\n\n"
-            "Este servicio es únicamente informativo. Cada usuario es responsable "
-            "de sus propias decisiones.",
-            reply_markup=volver_markup(),
-            parse_mode="Markdown",
-        )
+        async def _send(texto):
+            await query.edit_message_text(
+                texto,
+                reply_markup=volver_markup(),
+                parse_mode="Markdown",
+            )
+        await _responder_stats(_send, edit=True)
         return
 
     if plan == "free":
@@ -498,10 +731,16 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
+    # ── Plan GOLES ──────────────────────────────────────────────────────
     if plan == "goles":
+        stats       = get_stats_reales()
+        strike_real = _get_strike_tipo(stats, "gol")
+        strike_txt  = f"*{strike_real}* (último mes)" if strike_real else "*+70% estimado*"
+
         await query.edit_message_text(
-            f"⚽ *PLAN GOLES | +70% estimado*\n\n"
-            f"Precio: *{PRECIO_GOLES}*\n\n"
+            f"⚽ *PLAN GOLES*\n\n"
+            f"📈 Strike real: {strike_txt}\n"
+            f"💰 Precio: *{PRECIO_GOLES}*\n\n"
             "Incluye:\n"
             "• Alertas de gol en directo\n"
             "• Selecciones prepartido over 2.5\n"
@@ -512,10 +751,16 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
+    # ── Plan CORNERS ────────────────────────────────────────────────────
     if plan == "corners":
+        stats       = get_stats_reales()
+        strike_real = _get_strike_tipo(stats, "corner")
+        strike_txt  = f"*{strike_real}* (último mes)" if strike_real else "*+80% estimado*"
+
         await query.edit_message_text(
-            f"⛳ *PLAN CORNERS | +80% estimado*\n\n"
-            f"Precio: *{PRECIO_CORNERS}*\n\n"
+            f"⛳ *PLAN CORNERS*\n\n"
+            f"📈 Strike real: {strike_txt}\n"
+            f"💰 Precio: *{PRECIO_CORNERS}*\n\n"
             "Incluye:\n"
             "• Alertas especializadas en córners\n"
             "• Datos de momentum y presión ofensiva\n"
@@ -526,10 +771,23 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
+    # ── Plan COMBO ──────────────────────────────────────────────────────
     if plan == "combo":
+        stats         = get_stats_reales()
+        strike_goles  = _get_strike_tipo(stats, "gol")
+        strike_corner = _get_strike_tipo(stats, "corner")
+
+        if strike_goles and strike_corner:
+            strike_txt = f"⚽ {strike_goles} goles | 🚩 {strike_corner} corners (último mes)"
+        elif strike_goles or strike_corner:
+            strike_txt = f"*{strike_goles or strike_corner}* (último mes)"
+        else:
+            strike_txt = "*+75% estimado*"
+
         await query.edit_message_text(
-            f"🔥 *PLAN COMBO | +75% estimado*\n\n"
-            f"Precio: *{PRECIO_COMBO}*\n\n"
+            f"🔥 *PLAN COMBO*\n\n"
+            f"📈 Strike real: {strike_txt}\n"
+            f"💰 Precio: *{PRECIO_COMBO}*\n\n"
             "Incluye acceso completo a:\n"
             "⚽ GOLES\n"
             "⛳ CORNERS\n\n"
@@ -557,7 +815,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if plan.startswith("revolut:"):
         _, plan_real = plan.split(":", 1)
         importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO}
-        importe = importes.get(plan_real, "consultar")
+        importe  = importes.get(plan_real, "consultar")
         await query.edit_message_text(
             f"🟣 *Pago por Revolut*\n\n"
             f"Plan seleccionado: *{plan_real.upper()}*\n"
@@ -570,21 +828,16 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    # Botón "Obtener acceso" — el usuario recoge su enlace cuando está listo
     if plan == "obtener_acceso":
         await callback_obtener_acceso(update, context)
         return
 
 
 async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    El usuario pulsa 'Obtener mi acceso'. Se genera el enlace EN ESTE MOMENTO,
-    independientemente de cuándo se aprobó el pago o de la zona horaria del usuario.
-    """
     query = update.callback_query
     await query.answer()
 
-    user = query.from_user
+    user   = query.from_user
     acceso = get_acceso_pendiente(user.id)
 
     if not acceso:
@@ -655,13 +908,11 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     for admin_id in ADMIN_IDS:
         try:
-            # Aviso de texto con botones de aprobación
             await context.bot.send_message(
                 chat_id=admin_id,
                 text=texto_admin,
                 reply_markup=admin_approval_markup(user.id),
             )
-            # Reenvío del comprobante real (foto, PDF, texto, etc.)
             await message.forward(chat_id=admin_id)
         except Exception as e:
             logger.error(f"Error avisando al admin {admin_id}: {e}")
@@ -710,11 +961,9 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 plan=plan,
             )
 
-            # Registrar acceso pendiente — el enlace se genera cuando el usuario lo pida
             registrar_acceso_pendiente(user_id_int, plan)
             delete_pending_payment(user_id_int)
 
-            # Avisar al usuario de que puede recoger su acceso cuando quiera
             try:
                 await context.bot.send_message(
                     chat_id=user_id_int,
@@ -1062,7 +1311,6 @@ async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
     today = today_date()
 
-    # Solo traemos usuarios activos y relevantes (caducan en <= 3 días o ya caducaron)
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1134,6 +1382,21 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ==============================
+# COMANDO /stats — PÚBLICO
+# ==============================
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Muestra las estadísticas reales del servicio.
+    Accesible para cualquier usuario que hable con el bot.
+    """
+    async def _send(texto):
+        await update.message.reply_text(texto, parse_mode="Markdown")
+
+    await _responder_stats(_send)
+
+
+# ==============================
 # MAIN
 # ==============================
 
@@ -1144,6 +1407,11 @@ def main() -> None:
     if not DATABASE_URL:
         logger.critical("Falta DATABASE_URL en variables de entorno.")
         sys.exit(1)
+    if not PICKS_DATABASE_URL:
+        logger.warning(
+            "PICKS_DATABASE_URL no configurada — las estadísticas reales "
+            "no estarán disponibles en el bot premium."
+        )
 
     init_db()
 
@@ -1152,6 +1420,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start",         start))
     app.add_handler(CommandHandler("help",          help_command))
     app.add_handler(CommandHandler("whoami",        whoami))
+    app.add_handler(CommandHandler("stats",         cmd_stats))
     app.add_handler(CommandHandler("aprobar",       aprobar))
     app.add_handler(CommandHandler("rechazar",      rechazar))
     app.add_handler(CommandHandler("estado",        estado))
@@ -1161,7 +1430,6 @@ def main() -> None:
     app.add_handler(CommandHandler("activos",       activos))
     app.add_handler(CommandHandler("expulsar",      expulsar))
 
-    # El patrón approve/reject va primero para que no lo capture seleccionar_plan
     app.add_handler(CallbackQueryHandler(admin_action_callback, pattern=r"^(approve:|reject:)"))
     app.add_handler(CallbackQueryHandler(seleccionar_plan))
 
