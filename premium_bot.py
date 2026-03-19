@@ -628,7 +628,7 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _responder_stats(send_fn, edit: bool = False) -> None:
     """
     Función compartida entre el botón 📊 Stats y el comando /stats.
-    send_fn: corrutina que recibe (texto, parse_mode, reply_markup)
+    send_fn: corrutina que recibe el texto ya formateado.
     """
     stats = get_stats_reales()
 
@@ -651,6 +651,9 @@ async def _responder_stats(send_fn, edit: bool = False) -> None:
         )
 
     await send_fn(texto)
+
+
+async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
 
