@@ -59,14 +59,16 @@ PICKS_DATABASE_URL = os.getenv("PICKS_DATABASE_URL")
 
 ADMIN_IDS = [9330181]
 
-CANAL_CORNERS_ID = -1003895151594
-CANAL_GOLES_ID   = -1003818905455
+CANAL_CORNERS_ID  = -1003895151594
+CANAL_GOLES_ID    = -1003818905455
+CANAL_PRE_O25_ID  = -1003837149453  # Canal exclusivo Over 2.5 FT prepartido
 
 LINK_FREE = "https://t.me/+WhIkP2PstS1kMDVk"
 
 PRECIO_GOLES   = "20€"
 PRECIO_CORNERS = "20€"
 PRECIO_COMBO   = "30€"
+PRECIO_PRE_O25 = "30€"
 
 BIZUM        = "688946111"
 PAYPAL_LINK  = "https://paypal.me/erikenobi"
@@ -75,6 +77,20 @@ REVOLUT_LINK = "https://revolut.me/ericblasco9"
 STRIPE_GOLES   = "https://buy.stripe.com/aFa8wObuQ9MbdgA00x08g01"
 STRIPE_CORNERS = "https://buy.stripe.com/bJe3cugPaf6vdgA5kR08g02"
 STRIPE_COMBO   = "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
+STRIPE_PRE_O25 = "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
+
+# Estadísticas fijas del plan PRE O25 (ene–mar 2026)
+PRE_O25_STATS = {
+    "picks":   155,
+    "strike":  71.3,
+    "roi":     19.4,
+    "unidades": 114.9,
+    "meses": [
+        {"label": "Enero",   "strike": 66.7, "roi": 18.0, "unidades": 21.3},
+        {"label": "Febrero", "strike": 69.2, "roi": 16.4, "unidades": 41.8},
+        {"label": "Marzo",   "strike": 75.9, "roi": 21.8, "unidades": 51.8, "top": True},
+    ],
+}
 
 PLAN_DAYS    = 30
 INVITE_EXPIRY_HOURS = 1
@@ -378,6 +394,8 @@ def get_plan_channels(plan: str) -> list[tuple[str, int]]:
         return [("⛳ CORNERS", CANAL_CORNERS_ID)]
     if plan == "combo":
         return [("⚽ GOLES", CANAL_GOLES_ID), ("⛳ CORNERS", CANAL_CORNERS_ID)]
+    if plan == "pre_o25":
+        return [("📈 OVER 2.5 FT PRE", CANAL_PRE_O25_ID)]
     return []
 
 
@@ -537,6 +555,7 @@ def menu_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⛳ CORNERS", callback_data="corners"),
         ],
         [InlineKeyboardButton("🔥 COMBO", callback_data="combo")],
+        [InlineKeyboardButton("📈 OVER 2.5 FT — Exclusivo", callback_data="pre_o25")],
     ])
 
 
@@ -547,12 +566,20 @@ def volver_markup() -> InlineKeyboardMarkup:
 
 
 def pago_markup(plan: str) -> InlineKeyboardMarkup:
-    precios = {"goles": "20", "corners": "20", "combo": "30"}
-    stripes = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO}
+    precios = {"goles": "20", "corners": "20", "combo": "30", "pre_o25": "30"}
+    stripes = {
+        "goles":   STRIPE_GOLES,
+        "corners": STRIPE_CORNERS,
+        "combo":   STRIPE_COMBO,
+        "pre_o25": STRIPE_PRE_O25,
+    }
     importe = precios.get(plan, "")
 
-    keyboard = [
-        [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=stripes.get(plan, ""))],
+    keyboard = []
+    stripe_url = stripes.get(plan, "")
+    if stripe_url:
+        keyboard.append([InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=stripe_url)])
+    keyboard += [
         [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/{importe}")],
         [InlineKeyboardButton("📲 Pagar con Bizum", callback_data=f"bizum:{plan}")],
         [InlineKeyboardButton("🟣 Pagar con Revolut", callback_data=f"revolut:{plan}")],
@@ -567,8 +594,11 @@ def admin_approval_markup(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ Aprobar GOLES",   callback_data=f"approve:goles:{user_id}"),
             InlineKeyboardButton("✅ Aprobar CORNERS", callback_data=f"approve:corners:{user_id}"),
         ],
-        [InlineKeyboardButton("✅ Aprobar COMBO", callback_data=f"approve:combo:{user_id}")],
-        [InlineKeyboardButton("❌ Rechazar",      callback_data=f"reject:{user_id}")],
+        [
+            InlineKeyboardButton("✅ Aprobar COMBO",    callback_data=f"approve:combo:{user_id}"),
+            InlineKeyboardButton("✅ Aprobar PRE O25",  callback_data=f"approve:pre_o25:{user_id}"),
+        ],
+        [InlineKeyboardButton("❌ Rechazar", callback_data=f"reject:{user_id}")],
     ])
 
 
@@ -625,34 +655,6 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def _responder_stats(send_fn, edit: bool = False) -> None:
-    """
-    Función compartida entre el botón 📊 Stats y el comando /stats.
-    send_fn: corrutina que recibe el texto ya formateado.
-    """
-    stats = get_stats_reales()
-
-    if stats and (stats.get("globales") or stats.get("ultimo_mes")):
-        texto = _formatear_stats_reales(stats)
-    else:
-        texto = (
-            "📊 *Rendimiento del servicio*\n\n"
-            "⚽ *GOLES*\n"
-            "Acierto estimado actual: *+70%*\n"
-            "Incluye alertas de gol en directo y prepartido over 2.5.\n\n"
-            "⛳ *CORNERS*\n"
-            "Acierto estimado actual: *+80%*\n"
-            "Alertas en vivo basadas en estadísticas y momentum.\n\n"
-            "🔥 *COMBO*\n"
-            "Rendimiento estimado combinado: *+75%*\n"
-            "Acceso completo a GOLES + CORNERS.\n\n"
-            "⚠️ _Los datos en tiempo real no están disponibles en este momento. "
-            "Inténtalo más tarde._"
-        )
-
-    await send_fn(texto)
-
-
 async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -661,7 +663,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user = query.from_user
 
     # Registrar en pendientes cuando el usuario elige un plan de pago
-    if plan in ("goles", "corners", "combo"):
+    if plan in ("goles", "corners", "combo", "pre_o25"):
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -714,13 +716,32 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # ── Stats reales ────────────────────────────────────────────────────
     if plan == "stats":
-        async def _send(texto):
-            await query.edit_message_text(
-                texto,
-                reply_markup=volver_markup(),
-                parse_mode="Markdown",
+        stats = get_stats_reales()
+
+        if stats and (stats.get("globales") or stats.get("ultimo_mes")):
+            texto = _formatear_stats_reales(stats)
+        else:
+            # Fallback si no hay conexión a la picks DB o aún no hay datos
+            texto = (
+                "📊 *Rendimiento del servicio*\n\n"
+                "⚽ *GOLES*\n"
+                "Acierto estimado actual: *+70%*\n"
+                "Incluye alertas de gol en directo y prepartido over 2.5.\n\n"
+                "⛳ *CORNERS*\n"
+                "Acierto estimado actual: *+80%*\n"
+                "Alertas en vivo basadas en estadísticas y momentum.\n\n"
+                "🔥 *COMBO*\n"
+                "Rendimiento estimado combinado: *+75%*\n"
+                "Acceso completo a GOLES + CORNERS.\n\n"
+                "⚠️ _Los datos en tiempo real no están disponibles en este momento. "
+                "Inténtalo más tarde._"
             )
-        await _responder_stats(_send, edit=True)
+
+        await query.edit_message_text(
+            texto,
+            reply_markup=volver_markup(),
+            parse_mode="Markdown",
+        )
         return
 
     if plan == "free":
@@ -798,6 +819,33 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "según el volumen del día.\n\n"
             "Selecciona tu método de pago preferido:",
             reply_markup=pago_markup("combo"),
+            parse_mode="Markdown",
+        )
+        return
+
+    # ── Plan PRE OVER 2.5 FT ────────────────────────────────────────────
+    if plan == "pre_o25":
+        s = PRE_O25_STATS
+        meses_txt = "\n".join(
+            f"  ▸ {m['label']} → {m['strike']}% | ROI +{m['roi']}% | +{m['unidades']}u"
+            + (" 🏆" if m.get("top") else "")
+            for m in s["meses"]
+        )
+        await query.edit_message_text(
+            f"📈 *OVER 2.5 FT — Plan Exclusivo*\n\n"
+            f"Picks prepartido de over 2.5 goles seleccionados estadísticamente.\n"
+            f"Canal independiente, compatible con cualquier otro plan.\n\n"
+            f"📊 *Rendimiento Enero–Marzo 2026*\n"
+            f"✅ {s['picks']} picks enviados\n"
+            f"✅ {s['strike']}% de acierto\n"
+            f"✅ ROI global +{s['roi']}%\n"
+            f"✅ +{s['unidades']} unidades de ganancia\n\n"
+            f"📅 *Mes a mes:*\n"
+            f"{meses_txt}\n\n"
+            f"💰 Precio: *{PRECIO_PRE_O25}/mes*\n"
+            f"🏦 Bankroll recomendado: *500€ mínimo*\n\n"
+            "Selecciona tu método de pago:",
+            reply_markup=pago_markup("pre_o25"),
             parse_mode="Markdown",
         )
         return
@@ -946,7 +994,7 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             _, plan, user_id = parts
             user_id_int = int(user_id)
 
-            if plan not in ("goles", "corners", "combo"):
+            if plan not in ("goles", "corners", "combo", "pre_o25"):
                 await query.edit_message_text("Plan no válido.")
                 return
 
@@ -1042,8 +1090,8 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     plan = context.args[1].lower()
-    if plan not in ("goles", "corners", "combo"):
-        await update.message.reply_text("Plan no válido. Usa: goles, corners o combo")
+    if plan not in ("goles", "corners", "combo", "pre_o25"):
+        await update.message.reply_text("Plan no válido. Usa: goles, corners, combo o pre_o25")
         return
 
     pending = get_pending_payment(target_user_id)
@@ -1385,21 +1433,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ==============================
-# COMANDO /stats — PÚBLICO
-# ==============================
-
-async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Muestra las estadísticas reales del servicio.
-    Accesible para cualquier usuario que hable con el bot.
-    """
-    async def _send(texto):
-        await update.message.reply_text(texto, parse_mode="Markdown")
-
-    await _responder_stats(_send)
-
-
-# ==============================
 # MAIN
 # ==============================
 
@@ -1423,7 +1456,6 @@ def main() -> None:
     app.add_handler(CommandHandler("start",         start))
     app.add_handler(CommandHandler("help",          help_command))
     app.add_handler(CommandHandler("whoami",        whoami))
-    app.add_handler(CommandHandler("stats",         cmd_stats))
     app.add_handler(CommandHandler("aprobar",       aprobar))
     app.add_handler(CommandHandler("rechazar",      rechazar))
     app.add_handler(CommandHandler("estado",        estado))
