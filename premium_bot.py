@@ -566,7 +566,7 @@ def volver_markup() -> InlineKeyboardMarkup:
 
 
 def pago_markup(plan: str) -> InlineKeyboardMarkup:
-    precios = {"goles": "20", "corners": "20", "combo": "30", "pre_o25": "30"}
+    precios = {"goles": "20", "corners": "20", "combo": "30", "pre_o25": "20"}
     stripes = {
         "goles":   STRIPE_GOLES,
         "corners": STRIPE_CORNERS,
@@ -852,9 +852,12 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if plan.startswith("bizum:"):
         _, plan_real = plan.split(":", 1)
+        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre_o25": PRECIO_PRE_O25}
+        importe  = importes.get(plan_real, "consultar")
         await query.edit_message_text(
             f"📲 *Pago por Bizum*\n\n"
             f"Plan seleccionado: *{plan_real.upper()}*\n"
+            f"Importe: *{importe}*\n"
             f"Número Bizum: *{BIZUM}*\n\n"
             "Realiza el pago y envía el comprobante en este chat.\n"
             "Una vez validado recibirás el acceso automáticamente.",
@@ -865,7 +868,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if plan.startswith("revolut:"):
         _, plan_real = plan.split(":", 1)
-        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO}
+        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre_o25": PRECIO_PRE_O25}
         importe  = importes.get(plan_real, "consultar")
         await query.edit_message_text(
             f"🟣 *Pago por Revolut*\n\n"
