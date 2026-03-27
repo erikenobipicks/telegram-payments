@@ -583,6 +583,7 @@ def pago_markup(plan: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/{importe}")],
         [InlineKeyboardButton("📲 Pagar con Bizum", callback_data=f"bizum:{plan}")],
         [InlineKeyboardButton("🟣 Pagar con Revolut", callback_data=f"revolut:{plan}")],
+        [InlineKeyboardButton("✅ Ya he pagado — enviar comprobante", callback_data=f"pagado:{plan}")],
         [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -884,6 +885,29 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if plan == "obtener_acceso":
         await callback_obtener_acceso(update, context)
+        return
+
+    if plan.startswith("pagado:"):
+        _, plan_real = plan.split(":", 1)
+        nombres = {
+            "goles":   "GOLES",
+            "corners": "CORNERS",
+            "combo":   "COMBO",
+            "pre_o25": "OVER 2.5 FT PREPARTIDO",
+        }
+        nombre_plan = nombres.get(plan_real, plan_real.upper())
+        await query.edit_message_text(
+            f"✅ *¡Perfecto! Ya casi está.*\n\n"
+            f"Para activar tu acceso al plan *{nombre_plan}* solo necesito verificar el pago.\n\n"
+            f"👇 *Envíame aquí la captura o comprobante del pago* y lo activo en cuanto lo vea.\n\n"
+            f"📌 Puedes mandar:\n"
+            f"• Captura de pantalla del pago\n"
+            f"• PDF del recibo\n"
+            f"• Confirmación de la transferencia\n\n"
+            f"⏱ Normalmente activo los accesos en menos de 1 hora.",
+            reply_markup=volver_markup(),
+            parse_mode="Markdown",
+        )
         return
 
 
