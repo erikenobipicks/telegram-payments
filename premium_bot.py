@@ -68,7 +68,7 @@ LINK_FREE = "https://t.me/+WhIkP2PstS1kMDVk"
 PRECIO_GOLES   = "20€"
 PRECIO_CORNERS = "20€"
 PRECIO_COMBO   = "30€"
-PRECIO_PRE_O25 = "30€"
+PRECIO_PRE_O25 = "20€"
 
 BIZUM        = "688946111"
 PAYPAL_LINK  = "https://paypal.me/erikenobi"
@@ -555,7 +555,7 @@ def menu_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⛳ CORNERS", callback_data="corners"),
         ],
         [InlineKeyboardButton("🔥 COMBO", callback_data="combo")],
-        [InlineKeyboardButton("📈 OVER 2.5 FT — Exclusivo", callback_data="pre_o25")],
+        [InlineKeyboardButton("📈 OVER 2.5 FT Prepartido — Exclusivo", callback_data="pre_o25")],
     ])
 
 
@@ -832,7 +832,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             for m in s["meses"]
         )
         await query.edit_message_text(
-            f"📈 *OVER 2.5 FT — Plan Exclusivo*\n\n"
+            f"📈 *OVER 2.5 FT Prepartido — Plan Exclusivo*\n\n"
             f"Picks prepartido de over 2.5 goles seleccionados estadísticamente.\n"
             f"Canal independiente, compatible con cualquier otro plan.\n\n"
             f"📊 *Rendimiento Enero–Marzo 2026*\n"
@@ -1391,6 +1391,16 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                         f"⏳ Tu suscripción {record['plan'].upper()} caduca en 3 días "
                         f"({end_date}).\n"
                         "Cuando renueves, envíame el comprobante aquí."
+                    ),
+                )
+
+            elif days_left == 1:
+                await context.bot.send_message(
+                    chat_id=int(user_id),
+                    text=(
+                        f"⚠️ Tu suscripción {record['plan'].upper()} caduca *mañana* "
+                        f"({end_date}).\n"
+                        "Si quieres renovar, envíame el comprobante hoy para no perder el acceso."
                     ),
                 )
 
