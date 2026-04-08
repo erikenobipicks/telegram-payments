@@ -59,44 +59,35 @@ PICKS_DATABASE_URL = os.getenv("PICKS_DATABASE_URL")
 
 ADMIN_IDS = [9330181]
 
-CANAL_CORNERS_ID  = -1003895151594
-CANAL_GOLES_ID    = -1003818905455
-CANAL_PRE_O25_ID  = -1003837149453  # Canal exclusivo Over 2.5 FT prepartido
+CANAL_CORNERS_ID = -1003895151594
+CANAL_GOLES_ID   = -1003818905455
 
 LINK_FREE = "https://t.me/+WhIkP2PstS1kMDVk"
 
 PRECIO_GOLES   = "20€"
 PRECIO_CORNERS = "20€"
 PRECIO_COMBO   = "30€"
-PRECIO_PRE_O25 = "20€"
 
-BIZUM        = "688946111"
+BIZUM        = "+34660426660"
 PAYPAL_LINK  = "https://paypal.me/erikenobi"
 REVOLUT_LINK = "https://revolut.me/ericblasco9"
 
 STRIPE_GOLES   = "https://buy.stripe.com/aFa8wObuQ9MbdgA00x08g01"
 STRIPE_CORNERS = "https://buy.stripe.com/bJe3cugPaf6vdgA5kR08g02"
 STRIPE_COMBO   = "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
-STRIPE_PRE_O25 = "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
-
-# Estadísticas fijas del plan PRE O25 (ene–mar 2026)
-PRE_O25_STATS = {
-    "picks":   155,
-    "strike":  71.3,
-    "roi":     19.4,
-    "unidades": 114.9,
-    "meses": [
-        {"label": "Enero",   "strike": 66.7, "roi": 18.0, "unidades": 21.3},
-        {"label": "Febrero", "strike": 69.2, "roi": 16.4, "unidades": 41.8},
-        {"label": "Marzo",   "strike": 75.9, "roi": 21.8, "unidades": 51.8, "top": True},
-    ],
-}
 
 PLAN_DAYS    = 30
 INVITE_EXPIRY_HOURS = 1
 CHECK_EXPIRATIONS_EVERY_SECONDS = 43200  # 12h
 
 TIMEZONE = "Europe/Madrid"
+
+DEPLOYMENT_COMMIT = (
+    os.getenv("RAILWAY_GIT_COMMIT_SHA")
+    or os.getenv("RAILWAY_GIT_COMMIT_MESSAGE")
+    or os.getenv("RAILWAY_DEPLOYMENT_ID")
+    or "local"
+)
 
 # Meses en español para formateo de stats
 _MESES_ES = {
@@ -394,8 +385,6 @@ def get_plan_channels(plan: str) -> list[tuple[str, int]]:
         return [("⛳ CORNERS", CANAL_CORNERS_ID)]
     if plan == "combo":
         return [("⚽ GOLES", CANAL_GOLES_ID), ("⛳ CORNERS", CANAL_CORNERS_ID)]
-    if plan == "pre_o25":
-        return [("📈 OVER 2.5 FT PRE", CANAL_PRE_O25_ID)]
     return []
 
 
@@ -555,7 +544,6 @@ def menu_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⛳ CORNERS", callback_data="corners"),
         ],
         [InlineKeyboardButton("🔥 COMBO", callback_data="combo")],
-        [InlineKeyboardButton("📈 OVER 2.5 FT Prepartido — Exclusivo", callback_data="pre_o25")],
     ])
 
 
@@ -566,24 +554,15 @@ def volver_markup() -> InlineKeyboardMarkup:
 
 
 def pago_markup(plan: str) -> InlineKeyboardMarkup:
-    precios = {"goles": "20", "corners": "20", "combo": "30", "pre_o25": "20"}
-    stripes = {
-        "goles":   STRIPE_GOLES,
-        "corners": STRIPE_CORNERS,
-        "combo":   STRIPE_COMBO,
-        "pre_o25": STRIPE_PRE_O25,
-    }
+    precios = {"goles": "20", "corners": "20", "combo": "30"}
+    stripes = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO}
     importe = precios.get(plan, "")
 
-    keyboard = []
-    stripe_url = stripes.get(plan, "")
-    if stripe_url:
-        keyboard.append([InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=stripe_url)])
-    keyboard += [
+    keyboard = [
+        [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=stripes.get(plan, ""))],
         [InlineKeyboardButton("🅿️ Pagar con PayPal", url=f"{PAYPAL_LINK}/{importe}")],
         [InlineKeyboardButton("📲 Pagar con Bizum", callback_data=f"bizum:{plan}")],
         [InlineKeyboardButton("🟣 Pagar con Revolut", callback_data=f"revolut:{plan}")],
-        [InlineKeyboardButton("✅ Ya he pagado — enviar comprobante", callback_data=f"pagado:{plan}")],
         [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -595,11 +574,8 @@ def admin_approval_markup(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ Aprobar GOLES",   callback_data=f"approve:goles:{user_id}"),
             InlineKeyboardButton("✅ Aprobar CORNERS", callback_data=f"approve:corners:{user_id}"),
         ],
-        [
-            InlineKeyboardButton("✅ Aprobar COMBO",    callback_data=f"approve:combo:{user_id}"),
-            InlineKeyboardButton("✅ Aprobar PRE O25",  callback_data=f"approve:pre_o25:{user_id}"),
-        ],
-        [InlineKeyboardButton("❌ Rechazar", callback_data=f"reject:{user_id}")],
+        [InlineKeyboardButton("✅ Aprobar COMBO", callback_data=f"approve:combo:{user_id}")],
+        [InlineKeyboardButton("❌ Rechazar",      callback_data=f"reject:{user_id}")],
     ])
 
 
@@ -664,7 +640,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user = query.from_user
 
     # Registrar en pendientes cuando el usuario elige un plan de pago
-    if plan in ("goles", "corners", "combo", "pre_o25"):
+    if plan in ("goles", "corners", "combo"):
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -824,41 +800,11 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    # ── Plan PRE OVER 2.5 FT ────────────────────────────────────────────
-    if plan == "pre_o25":
-        s = PRE_O25_STATS
-        meses_txt = "\n".join(
-            f"  ▸ {m['label']} → {m['strike']}% | ROI +{m['roi']}% | +{m['unidades']}u"
-            + (" 🏆" if m.get("top") else "")
-            for m in s["meses"]
-        )
-        await query.edit_message_text(
-            f"📈 *OVER 2.5 FT Prepartido — Plan Exclusivo*\n\n"
-            f"Picks prepartido de over 2.5 goles seleccionados estadísticamente.\n"
-            f"Canal independiente, compatible con cualquier otro plan.\n\n"
-            f"📊 *Rendimiento Enero–Marzo 2026*\n"
-            f"✅ {s['picks']} picks enviados\n"
-            f"✅ {s['strike']}% de acierto\n"
-            f"✅ ROI global +{s['roi']}%\n"
-            f"✅ +{s['unidades']} unidades de ganancia\n\n"
-            f"📅 *Mes a mes:*\n"
-            f"{meses_txt}\n\n"
-            f"💰 Precio: *{PRECIO_PRE_O25}/mes*\n"
-            f"🏦 Bankroll recomendado: *500€ mínimo*\n\n"
-            "Selecciona tu método de pago:",
-            reply_markup=pago_markup("pre_o25"),
-            parse_mode="Markdown",
-        )
-        return
-
     if plan.startswith("bizum:"):
         _, plan_real = plan.split(":", 1)
-        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre_o25": PRECIO_PRE_O25}
-        importe  = importes.get(plan_real, "consultar")
         await query.edit_message_text(
             f"📲 *Pago por Bizum*\n\n"
             f"Plan seleccionado: *{plan_real.upper()}*\n"
-            f"Importe: *{importe}*\n"
             f"Número Bizum: *{BIZUM}*\n\n"
             "Realiza el pago y envía el comprobante en este chat.\n"
             "Una vez validado recibirás el acceso automáticamente.",
@@ -869,7 +815,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if plan.startswith("revolut:"):
         _, plan_real = plan.split(":", 1)
-        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre_o25": PRECIO_PRE_O25}
+        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO}
         importe  = importes.get(plan_real, "consultar")
         await query.edit_message_text(
             f"🟣 *Pago por Revolut*\n\n"
@@ -885,29 +831,6 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if plan == "obtener_acceso":
         await callback_obtener_acceso(update, context)
-        return
-
-    if plan.startswith("pagado:"):
-        _, plan_real = plan.split(":", 1)
-        nombres = {
-            "goles":   "GOLES",
-            "corners": "CORNERS",
-            "combo":   "COMBO",
-            "pre_o25": "OVER 2.5 FT PREPARTIDO",
-        }
-        nombre_plan = nombres.get(plan_real, plan_real.upper())
-        await query.edit_message_text(
-            f"✅ *¡Perfecto! Ya casi está.*\n\n"
-            f"Para activar tu acceso al plan *{nombre_plan}* solo necesito verificar el pago.\n\n"
-            f"👇 *Envíame aquí la captura o comprobante del pago* y lo activo en cuanto lo vea.\n\n"
-            f"📌 Puedes mandar:\n"
-            f"• Captura de pantalla del pago\n"
-            f"• PDF del recibo\n"
-            f"• Confirmación de la transferencia\n\n"
-            f"⏱ Normalmente activo los accesos en menos de 1 hora.",
-            reply_markup=volver_markup(),
-            parse_mode="Markdown",
-        )
         return
 
 
@@ -1021,7 +944,7 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             _, plan, user_id = parts
             user_id_int = int(user_id)
 
-            if plan not in ("goles", "corners", "combo", "pre_o25"):
+            if plan not in ("goles", "corners", "combo"):
                 await query.edit_message_text("Plan no válido.")
                 return
 
@@ -1117,8 +1040,8 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     plan = context.args[1].lower()
-    if plan not in ("goles", "corners", "combo", "pre_o25"):
-        await update.message.reply_text("Plan no válido. Usa: goles, corners, combo o pre_o25")
+    if plan not in ("goles", "corners", "combo"):
+        await update.message.reply_text("Plan no válido. Usa: goles, corners o combo")
         return
 
     pending = get_pending_payment(target_user_id)
@@ -1219,6 +1142,21 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Inicio: {record['fecha_inicio']}\n"
         f"Fin: {record['fecha_fin']}\n"
         f"Estado: {record['estado']}"
+    )
+
+
+async def debug_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos para usar este comando.")
+        return
+
+    await update.message.reply_text(
+        "DEBUG PREMIUM\n\n"
+        f"BIZUM: {BIZUM}\n"
+        f"DEPLOYMENT: {DEPLOYMENT_COMMIT}\n"
+        f"BOT_TOKEN cargado: {'si' if bool(TOKEN) else 'no'}\n"
+        f"DATABASE_URL cargada: {'si' if bool(DATABASE_URL) else 'no'}\n"
+        f"PICKS_DATABASE_URL cargada: {'si' if bool(PICKS_DATABASE_URL) else 'no'}"
     )
 
 
@@ -1421,16 +1359,6 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     ),
                 )
 
-            elif days_left == 1:
-                await context.bot.send_message(
-                    chat_id=int(user_id),
-                    text=(
-                        f"⚠️ Tu suscripción {record['plan'].upper()} caduca *mañana* "
-                        f"({end_date}).\n"
-                        "Si quieres renovar, envíame el comprobante hoy para no perder el acceso."
-                    ),
-                )
-
             elif days_left == 0:
                 await context.bot.send_message(
                     chat_id=int(user_id),
@@ -1496,6 +1424,7 @@ def main() -> None:
     app.add_handler(CommandHandler("aprobar",       aprobar))
     app.add_handler(CommandHandler("rechazar",      rechazar))
     app.add_handler(CommandHandler("estado",        estado))
+    app.add_handler(CommandHandler("debugpremium",  debug_premium))
     app.add_handler(CommandHandler("listar",        listar))
     app.add_handler(CommandHandler("pendientes",    pendientes))
     app.add_handler(CommandHandler("caducan",       caducan))
@@ -1521,7 +1450,11 @@ def main() -> None:
         first=20,
     )
 
-    logger.info("Bot premium iniciado.")
+    logger.info(
+        "Bot premium iniciado. BIZUM=%s | deployment=%s",
+        BIZUM,
+        DEPLOYMENT_COMMIT,
+    )
     app.run_polling(drop_pending_updates=True)
 
 
