@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -101,7 +102,26 @@ _MESES_ES = {
 # DB — BOT PREMIUM
 # ==============================
 
+_pool: ConnectionPool | None = None
+
+
+def init_pool() -> None:
+    global _pool
+    if not DATABASE_URL:
+        raise ValueError("Falta DATABASE_URL en variables de entorno.")
+    _pool = ConnectionPool(
+        conninfo=DATABASE_URL,
+        min_size=1,
+        max_size=5,
+        kwargs={"row_factory": dict_row},
+    )
+    _pool.wait()
+    logger.info("Pool de conexiones DB inicializado.")
+
+
 def get_conn():
+    if _pool is not None:
+        return _pool.connection()
     if not DATABASE_URL:
         raise ValueError("Falta DATABASE_URL en variables de entorno.")
     return psycopg.connect(DATABASE_URL, row_factory=dict_row)
@@ -200,11 +220,14 @@ def get_stats_reales() -> dict | None:
                 """)
                 globales = {row["tipo_pick"]: row for row in cur.fetchall()}
 
-                # Último mes cerrado
+                # Último mes cerrado (zona horaria Madrid)
                 cur.execute("""
                     SELECT
                         TO_CHAR(
-                            date_trunc('month', CURRENT_DATE - INTERVAL '1 month'),
+                            date_trunc('month',
+                                (CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Madrid')::date
+                                - INTERVAL '1 month'
+                            ),
                             'YYYY-MM'
                         ) AS mes,
                         tipo_pick,
@@ -215,7 +238,10 @@ def get_stats_reales() -> dict | None:
                     FROM picks
                     WHERE resultado IS NOT NULL
                       AND date_trunc('month', fecha) =
-                          date_trunc('month', CURRENT_DATE - INTERVAL '1 month')
+                          date_trunc('month',
+                              (CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Madrid')::date
+                              - INTERVAL '1 month'
+                          )
                     GROUP BY mes, tipo_pick;
                 """)
                 ultimo_mes_rows = cur.fetchall()
@@ -1278,6 +1304,81 @@ async def activos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(texto[:4000])
 
 
+async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Extiende manualmente la suscripción de un usuario sin pasar por el flujo de pago.
+    Uso: /renovar user_id [plan]
+    Si se omite el plan, usa el que ya tiene el usuario.
+    """
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos para usar este comando.")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("Uso: /renovar user_id [goles|corners|combo]")
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El user_id no es válido.")
+        return
+
+    # Buscar plan actual si no se especifica uno nuevo
+    plan_nuevo = context.args[1].lower() if len(context.args) >= 2 else None
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT username, full_name, plan FROM users WHERE telegram_user_id = %s",
+                (target_user_id,),
+            )
+            existing = cur.fetchone()
+
+    if not existing and not plan_nuevo:
+        await update.message.reply_text(
+            "Ese usuario no tiene suscripción previa. Especifica el plan: /renovar user_id goles"
+        )
+        return
+
+    plan = plan_nuevo or existing["plan"]
+    if plan not in ("goles", "corners", "combo"):
+        await update.message.reply_text("Plan no válido. Usa: goles, corners o combo")
+        return
+
+    username   = existing["username"] if existing else None
+    full_name  = existing["full_name"] if existing else f"Usuario {target_user_id}"
+
+    record = extend_subscription(
+        user_id=target_user_id,
+        username=username,
+        full_name=full_name,
+        plan=plan,
+    )
+
+    registrar_acceso_pendiente(target_user_id, plan)
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "✅ *Suscripción renovada*\n\n"
+                f"Plan activo: *{plan.upper()}*\n"
+                f"Válido hasta: {record['fecha_fin']}\n\n"
+                "Pulsa el botón cuando estés listo para entrar al canal."
+            ),
+            reply_markup=acceso_listo_markup(),
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.error(f"Error avisando renovación a {target_user_id}: {e}")
+
+    await update.message.reply_text(
+        f"✅ Suscripción renovada: usuario {target_user_id} | {plan.upper()} | hasta {record['fecha_fin']}"
+    )
+    logger.info(f"Renovación manual: user {target_user_id} | plan {plan} | hasta {record['fecha_fin']}")
+
+
 async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _check_admin(update):
         await update.message.reply_text("No tienes permisos.")
@@ -1359,6 +1460,16 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     ),
                 )
 
+            elif days_left == 1:
+                await context.bot.send_message(
+                    chat_id=int(user_id),
+                    text=(
+                        f"⚠️ Tu suscripción {record['plan'].upper()} caduca mañana "
+                        f"({end_date}).\n"
+                        "Si quieres renovar sin perder el acceso, envíame el comprobante hoy."
+                    ),
+                )
+
             elif days_left == 0:
                 await context.bot.send_message(
                     chat_id=int(user_id),
@@ -1414,6 +1525,7 @@ def main() -> None:
             "no estarán disponibles en el bot premium."
         )
 
+    init_pool()
     init_db()
 
     app = ApplicationBuilder().token(TOKEN).build()
@@ -1430,6 +1542,7 @@ def main() -> None:
     app.add_handler(CommandHandler("caducan",       caducan))
     app.add_handler(CommandHandler("activos",       activos))
     app.add_handler(CommandHandler("expulsar",      expulsar))
+    app.add_handler(CommandHandler("renovar",       renovar))
 
     app.add_handler(CallbackQueryHandler(admin_action_callback, pattern=r"^(approve:|reject:)"))
     app.add_handler(CallbackQueryHandler(seleccionar_plan))
