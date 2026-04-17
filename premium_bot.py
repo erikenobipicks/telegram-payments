@@ -62,12 +62,14 @@ ADMIN_IDS = [9330181]
 
 CANAL_CORNERS_ID = -1003895151594
 CANAL_GOLES_ID   = -1003818905455
+CANAL_PRE_ID     = -1003837149453   # Over 2.5 FT prepartido — análisis manual
 
 LINK_FREE = "https://t.me/+WhIkP2PstS1kMDVk"
 
 PRECIO_GOLES   = "20€"
 PRECIO_CORNERS = "20€"
 PRECIO_COMBO   = "30€"
+PRECIO_PRE     = "20€"
 
 BIZUM        = "+34660426660"
 PAYPAL_LINK  = "https://paypal.me/erikenobi"
@@ -76,6 +78,7 @@ REVOLUT_LINK = "https://revolut.me/ericblasco9"
 STRIPE_GOLES   = "https://buy.stripe.com/aFa8wObuQ9MbdgA00x08g01"
 STRIPE_CORNERS = "https://buy.stripe.com/bJe3cugPaf6vdgA5kR08g02"
 STRIPE_COMBO   = "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
+STRIPE_PRE     = os.getenv("STRIPE_PRE", "")   # TODO: añadir enlace Stripe del plan PRE
 
 PLAN_DAYS    = 30
 INVITE_EXPIRY_HOURS = 1
@@ -408,9 +411,11 @@ def get_plan_channels(plan: str) -> list[tuple[str, int]]:
     if plan == "goles":
         return [("⚽ GOLES", CANAL_GOLES_ID)]
     if plan == "corners":
-        return [("⛳ CORNERS", CANAL_CORNERS_ID)]
+        return [("🚩 CORNERS", CANAL_CORNERS_ID)]
+    if plan == "pre":
+        return [("📊 PREPARTIDO", CANAL_PRE_ID)]
     if plan == "combo":
-        return [("⚽ GOLES", CANAL_GOLES_ID), ("⛳ CORNERS", CANAL_CORNERS_ID)]
+        return [("⚽ GOLES", CANAL_GOLES_ID), ("🚩 CORNERS", CANAL_CORNERS_ID)]
     return []
 
 
@@ -569,6 +574,7 @@ def menu_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⚽ GOLES — 20€",   callback_data="goles"),
             InlineKeyboardButton("🚩 CORNERS — 20€", callback_data="corners"),
         ],
+        [InlineKeyboardButton("📊 PREPARTIDO — 20€", callback_data="pre")],
         [InlineKeyboardButton("🔥 COMBO — 30€",      callback_data="combo")],
         [InlineKeyboardButton("💬 Contacto",          url="https://t.me/erikenobi")],
     ])
@@ -581,12 +587,15 @@ def volver_markup() -> InlineKeyboardMarkup:
 
 
 def pago_markup(plan: str) -> InlineKeyboardMarkup:
-    precios = {"goles": "20", "corners": "20", "combo": "30"}
-    stripes = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO}
+    precios = {"goles": "20", "corners": "20", "combo": "30", "pre": "20"}
+    stripes = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO, "pre": STRIPE_PRE}
     importe = precios.get(plan, "")
 
-    keyboard = [
-        [InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=stripes.get(plan, ""))],
+    stripe_url = stripes.get(plan, "")
+    keyboard = []
+    if stripe_url:
+        keyboard.append([InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=stripe_url)])
+    keyboard += [
         [InlineKeyboardButton("🅿️ Pagar con PayPal",           url=f"{PAYPAL_LINK}/{importe}")],
         [InlineKeyboardButton("📲 Bizum",   callback_data=f"bizum:{plan}"),
          InlineKeyboardButton("🟣 Revolut", callback_data=f"revolut:{plan}")],
@@ -602,8 +611,11 @@ def admin_approval_markup(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ Aprobar GOLES",   callback_data=f"approve:goles:{user_id}"),
             InlineKeyboardButton("✅ Aprobar CORNERS", callback_data=f"approve:corners:{user_id}"),
         ],
-        [InlineKeyboardButton("✅ Aprobar COMBO", callback_data=f"approve:combo:{user_id}")],
-        [InlineKeyboardButton("❌ Rechazar",      callback_data=f"reject:{user_id}")],
+        [
+            InlineKeyboardButton("✅ Aprobar PRE",   callback_data=f"approve:pre:{user_id}"),
+            InlineKeyboardButton("✅ Aprobar COMBO", callback_data=f"approve:combo:{user_id}"),
+        ],
+        [InlineKeyboardButton("❌ Rechazar", callback_data=f"reject:{user_id}")],
     ])
 
 
@@ -633,9 +645,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     texto = (
         "🔥 *Erikenobi Picks Premium*\n\n"
         "Alertas de fútbol en tiempo real con análisis estadístico avanzado.\n\n"
-        "⚽ *GOLES* — Alertas en directo + prepartido\n"
+        "⚽ *GOLES* — Alertas de gol en directo\n"
         "🚩 *CORNERS* — Mercados de córners en vivo\n"
-        "🔥 *COMBO* — Acceso completo a los dos canales\n\n"
+        "📊 *PREPARTIDO* — Análisis manual Over 2\\.5 FT\n"
+        "🔥 *COMBO* — GOLES \\+ CORNERS\n\n"
         "Elige un plan o consulta la información:"
     )
     await update.message.reply_text(
@@ -670,7 +683,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user = query.from_user
 
     # Registrar en pendientes cuando el usuario elige un plan de pago
-    if plan in ("goles", "corners", "combo"):
+    if plan in ("goles", "corners", "combo", "pre"):
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -690,13 +703,14 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if plan == "menu":
         await query.edit_message_text(
             "🔥 *Erikenobi Picks Premium*\n\n"
-            "Alertas de fútbol en tiempo real con análisis estadístico avanzado.\n\n"
-            "⚽ *GOLES* — Alertas en directo + prepartido\n"
+            "Alertas de fútbol en tiempo real con análisis estadístico avanzado\\.\n\n"
+            "⚽ *GOLES* — Alertas de gol en directo\n"
             "🚩 *CORNERS* — Mercados de córners en vivo\n"
-            "🔥 *COMBO* — Acceso completo a los dos canales\n\n"
+            "📊 *PREPARTIDO* — Análisis manual Over 2\\.5 FT\n"
+            "🔥 *COMBO* — GOLES \\+ CORNERS\n\n"
             "Elige un plan o consulta la información:",
             reply_markup=menu_markup(),
-            parse_mode="Markdown",
+            parse_mode="MarkdownV2",
         )
         return
 
@@ -722,9 +736,11 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.edit_message_text(
             "ℹ️ *Cómo funciona*\n\n"
             "⚽ *GOLES — 20€/mes*\n"
-            "Alertas de gol en directo \\+ selecciones prepartido over 2\\.5\\.\n\n"
+            "Alertas de gol en directo\\.\n\n"
             "🚩 *CORNERS — 20€/mes*\n"
             "Alertas especializadas en mercados de córners en vivo\\.\n\n"
+            "📊 *PREPARTIDO — 20€/mes*\n"
+            "Análisis manual Over 2\\.5 FT\\. Canal independiente\\.\n\n"
             "🔥 *COMBO — 30€/mes*\n"
             "Acceso completo a GOLES \\+ CORNERS\\.\n\n"
             "📲 *Métodos de pago*\n"
@@ -834,6 +850,23 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             + _GUIA_PAGO + "\n\n"
             "Selecciona tu método de pago:",
             reply_markup=pago_markup("corners"),
+            parse_mode="MarkdownV2",
+        )
+        return
+
+    # ── Plan PREPARTIDO ─────────────────────────────────────────────────
+    if plan == "pre":
+        await query.edit_message_text(
+            "📊 *PLAN PREPARTIDO*\n\n"
+            "💰 Precio: *20€/mes*\n\n"
+            "✅ Incluye:\n"
+            "• Análisis manual prepartido\n"
+            "• Selecciones Over 2\\.5 FT\n"
+            "• Picks con estadísticas y contexto del partido\n\n"
+            "📌 Canal independiente de GOLES y CORNERS\\."
+            + _GUIA_PAGO + "\n\n"
+            "Selecciona tu método de pago:",
+            reply_markup=pago_markup("pre"),
             parse_mode="MarkdownV2",
         )
         return
@@ -1026,7 +1059,7 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             _, plan, user_id = parts
             user_id_int = int(user_id)
 
-            if plan not in ("goles", "corners", "combo"):
+            if plan not in ("goles", "corners", "combo", "pre"):
                 await query.edit_message_text("Plan no válido.")
                 return
 
@@ -1123,7 +1156,7 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     plan = context.args[1].lower()
     if plan not in ("goles", "corners", "combo"):
-        await update.message.reply_text("Plan no válido. Usa: goles, corners o combo")
+        await update.message.reply_text("Plan no válido. Usa: goles, corners, pre o combo")
         return
 
     pending = get_pending_payment(target_user_id)
@@ -1399,7 +1432,7 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     plan = plan_nuevo or existing["plan"]
     if plan not in ("goles", "corners", "combo"):
-        await update.message.reply_text("Plan no válido. Usa: goles, corners o combo")
+        await update.message.reply_text("Plan no válido. Usa: goles, corners, pre o combo")
         return
 
     username   = existing["username"] if existing else None
