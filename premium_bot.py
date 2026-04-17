@@ -78,7 +78,7 @@ REVOLUT_LINK = "https://revolut.me/ericblasco9"
 STRIPE_GOLES   = "https://buy.stripe.com/aFa8wObuQ9MbdgA00x08g01"
 STRIPE_CORNERS = "https://buy.stripe.com/bJe3cugPaf6vdgA5kR08g02"
 STRIPE_COMBO   = "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
-STRIPE_PRE     = os.getenv("STRIPE_PRE", "")   # TODO: añadir enlace Stripe del plan PRE
+STRIPE_PRE     = "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
 
 PLAN_DAYS    = 30
 INVITE_EXPIRY_HOURS = 1
