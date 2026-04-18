@@ -1030,10 +1030,20 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
     for titulo, link in enlaces:
         texto += f"{titulo}\n{link}\n\n"
 
-    texto += "⚠️ El enlace es de un solo uso. Úsalo cuanto antes."
+    texto += (
+        "⚠️ El enlace es de un solo uso y caduca en 1 hora.\n"
+        "Si caduca antes de usarlo, pulsa el botón de abajo para generar uno nuevo."
+    )
 
-    await query.edit_message_text(texto, parse_mode="Markdown")
-    borrar_acceso_pendiente(user.id)
+    # No borramos pending_access: así el usuario puede regenerar el enlace
+    # si caduca antes de usarlo. Se limpia cuando la suscripción expira.
+    await query.edit_message_text(
+        texto,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔄 Generar nuevo enlace", callback_data="obtener_acceso")]]
+        ),
+    )
     logger.info(f"Acceso entregado a usuario {user.id} para plan {plan}")
 
 
@@ -1575,6 +1585,7 @@ async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await expulsar_de_canales(context, target_user_id, record["plan"])
+    borrar_acceso_pendiente(target_user_id)
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -1713,6 +1724,7 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             elif days_left < 0:
                 await expulsar_de_canales(context, int(user_id), record["plan"])
+                borrar_acceso_pendiente(user_id)
 
                 with get_conn() as conn:
                     with conn.cursor() as cur:
