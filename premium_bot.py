@@ -93,6 +93,11 @@ DEPLOYMENT_COMMIT = (
     or "local"
 )
 
+# Avisos de expiración ya enviados en este proceso (evita duplicados entre
+# las dos ejecuciones diarias del job). Se pierde en reinicio, lo cual es
+# aceptable: en el peor caso se envía el aviso dos veces tras un restart.
+_avisos_enviados: set[tuple[int, str]] = set()
+
 # Meses en español para formateo de stats
 _MESES_ES = {
     "01": "Ene", "02": "Feb", "03": "Mar", "04": "Abr",
@@ -443,17 +448,21 @@ async def generar_enlaces_acceso(context: ContextTypes.DEFAULT_TYPE, plan: str) 
 # ==============================
 
 def registrar_acceso_pendiente(user_id: int, plan: str) -> None:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO pending_access (telegram_user_id, plan, approved_at)
-                VALUES (%s, %s, NOW())
-                ON CONFLICT (telegram_user_id)
-                DO UPDATE SET plan = EXCLUDED.plan, approved_at = NOW();
-                """,
-                (user_id, plan),
-            )
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO pending_access (telegram_user_id, plan, approved_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (telegram_user_id)
+                    DO UPDATE SET plan = EXCLUDED.plan, approved_at = NOW();
+                    """,
+                    (user_id, plan),
+                )
+    except Exception as e:
+        logger.error("Error registrando acceso pendiente para %s: %s", user_id, e)
+        raise
 
 
 def get_acceso_pendiente(user_id: int):
@@ -467,12 +476,15 @@ def get_acceso_pendiente(user_id: int):
 
 
 def borrar_acceso_pendiente(user_id: int) -> None:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM pending_access WHERE telegram_user_id = %s",
-                (user_id,),
-            )
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM pending_access WHERE telegram_user_id = %s",
+                    (user_id,),
+                )
+    except Exception as e:
+        logger.error("Error borrando acceso pendiente para %s: %s", user_id, e)
 
 
 # ==============================
@@ -508,44 +520,48 @@ def delete_pending_payment(user_id: int) -> None:
 def extend_subscription(user_id: int, username: str | None, full_name: str, plan: str):
     today = today_date()
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT fecha_fin FROM users WHERE telegram_user_id = %s",
-                (user_id,),
-            )
-            existing = cur.fetchone()
-
-            if existing and existing["fecha_fin"]:
-                old_expiry = existing["fecha_fin"]
-                if isinstance(old_expiry, str):
-                    old_expiry = parse_date(old_expiry)
-                base_date = old_expiry if old_expiry >= today else today
-                new_expiry = base_date + timedelta(days=PLAN_DAYS)
-            else:
-                new_expiry = today + timedelta(days=PLAN_DAYS)
-
-            cur.execute(
-                """
-                INSERT INTO users (
-                    telegram_user_id, username, full_name, plan,
-                    fecha_inicio, fecha_fin, estado, created_at, updated_at
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT fecha_fin FROM users WHERE telegram_user_id = %s",
+                    (user_id,),
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, 'activo', NOW(), NOW())
-                ON CONFLICT (telegram_user_id)
-                DO UPDATE SET
-                    username     = EXCLUDED.username,
-                    full_name    = EXCLUDED.full_name,
-                    plan         = EXCLUDED.plan,
-                    fecha_inicio = EXCLUDED.fecha_inicio,
-                    fecha_fin    = EXCLUDED.fecha_fin,
-                    estado       = 'activo',
-                    updated_at   = NOW()
-                RETURNING telegram_user_id, username, full_name, plan, fecha_inicio, fecha_fin, estado
-                """,
-                (user_id, username, full_name, plan, today, new_expiry),
-            )
-            return cur.fetchone()
+                existing = cur.fetchone()
+
+                if existing and existing["fecha_fin"]:
+                    old_expiry = existing["fecha_fin"]
+                    if isinstance(old_expiry, str):
+                        old_expiry = parse_date(old_expiry)
+                    base_date = old_expiry if old_expiry >= today else today
+                    new_expiry = base_date + timedelta(days=PLAN_DAYS)
+                else:
+                    new_expiry = today + timedelta(days=PLAN_DAYS)
+
+                cur.execute(
+                    """
+                    INSERT INTO users (
+                        telegram_user_id, username, full_name, plan,
+                        fecha_inicio, fecha_fin, estado, created_at, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, 'activo', NOW(), NOW())
+                    ON CONFLICT (telegram_user_id)
+                    DO UPDATE SET
+                        username     = EXCLUDED.username,
+                        full_name    = EXCLUDED.full_name,
+                        plan         = EXCLUDED.plan,
+                        fecha_inicio = EXCLUDED.fecha_inicio,
+                        fecha_fin    = EXCLUDED.fecha_fin,
+                        estado       = 'activo',
+                        updated_at   = NOW()
+                    RETURNING telegram_user_id, username, full_name, plan, fecha_inicio, fecha_fin, estado
+                    """,
+                    (user_id, username, full_name, plan, today, new_expiry),
+                )
+                return cur.fetchone()
+    except Exception as e:
+        logger.error("Error en extend_subscription para %s: %s", user_id, e)
+        raise
 
 
 async def expulsar_de_canales(context: ContextTypes.DEFAULT_TYPE, user_id: int, plan: str) -> None:
@@ -684,21 +700,24 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Registrar en pendientes cuando el usuario elige un plan de pago
     if plan in ("goles", "corners", "combo", "pre"):
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO pending_payments (telegram_user_id, username, full_name, plan, created_at)
-                    VALUES (%s, %s, %s, %s, NOW())
-                    ON CONFLICT (telegram_user_id)
-                    DO UPDATE SET
-                        username   = EXCLUDED.username,
-                        full_name  = EXCLUDED.full_name,
-                        plan       = EXCLUDED.plan,
-                        created_at = NOW();
-                    """,
-                    (user.id, user.username, user.full_name, plan),
-                )
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO pending_payments (telegram_user_id, username, full_name, plan, created_at)
+                        VALUES (%s, %s, %s, %s, NOW())
+                        ON CONFLICT (telegram_user_id)
+                        DO UPDATE SET
+                            username   = EXCLUDED.username,
+                            full_name  = EXCLUDED.full_name,
+                            plan       = EXCLUDED.plan,
+                            created_at = NOW();
+                        """,
+                        (user.id, user.username, user.full_name, plan),
+                    )
+        except Exception as e:
+            logger.error("Error guardando pago pendiente para %s: %s", user.id, e)
 
     if plan == "menu":
         await query.edit_message_text(
@@ -1155,7 +1174,7 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     plan = context.args[1].lower()
-    if plan not in ("goles", "corners", "combo"):
+    if plan not in ("goles", "corners", "combo", "pre"):
         await update.message.reply_text("Plan no válido. Usa: goles, corners, pre o combo")
         return
 
@@ -1404,7 +1423,7 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if len(context.args) < 1:
-        await update.message.reply_text("Uso: /renovar user_id [goles|corners|combo]")
+        await update.message.reply_text("Uso: /renovar user_id [goles|corners|pre|combo]")
         return
 
     try:
@@ -1431,7 +1450,7 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     plan = plan_nuevo or existing["plan"]
-    if plan not in ("goles", "corners", "combo"):
+    if plan not in ("goles", "corners", "combo", "pre"):
         await update.message.reply_text("Plan no válido. Usa: goles, corners, pre o combo")
         return
 
@@ -1511,6 +1530,35 @@ async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ==============================
+# HELPERS — AVISOS DE EXPIRACIÓN
+# ==============================
+
+def _instrucciones_renovacion(plan: str) -> str:
+    """
+    Devuelve el bloque de texto con precio, métodos de pago y pasos
+    que se incluye en todos los avisos de expiración.
+    """
+    precios  = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre": PRECIO_PRE}
+    stripes  = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO, "pre": STRIPE_PRE}
+
+    precio     = precios.get(plan, "20€")
+    stripe_url = stripes.get(plan, "")
+
+    stripe_linea = f"• 💳 Tarjeta (Stripe): {stripe_url}\n" if stripe_url else ""
+
+    return (
+        f"\n\n💰 *Precio:* {precio}/mes\n\n"
+        "📋 *Para renovar:*\n"
+        f"{stripe_linea}"
+        f"• 🅿️ PayPal: {PAYPAL_LINK}\n"
+        f"• 📲 Bizum: {BIZUM}\n"
+        f"• 🟣 Revolut: {REVOLUT_LINK}\n\n"
+        "Una vez pagado, *envíame aquí la captura del comprobante* ⬅️ "
+        "y activo el acceso en cuanto lo vea."
+    )
+
+
+# ==============================
 # JOB — EXPIRACIÓN AUTOMÁTICA
 # ==============================
 
@@ -1539,35 +1587,69 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             days_left = (end_date - today).days
 
+            # Clave de deduplicación: (user_id, "aviso_N_dias")
+            # Evita enviar el mismo aviso dos veces en el mismo día si el job
+            # se ejecuta varias veces (o si el proceso se reinicia).
+            aviso_key: tuple[int, str] | None = None
+
+            plan_upper = record["plan"].upper()
+            renovar    = _instrucciones_renovacion(record["plan"])
+
             if days_left == 3:
-                await context.bot.send_message(
-                    chat_id=int(user_id),
-                    text=(
-                        f"⏳ Tu suscripción {record['plan'].upper()} caduca en 3 días "
-                        f"({end_date}).\n"
-                        "Cuando renueves, envíame el comprobante aquí."
-                    ),
-                )
+                aviso_key = (user_id, "aviso_3")
+                if aviso_key not in _avisos_enviados:
+                    await context.bot.send_message(
+                        chat_id=int(user_id),
+                        text=(
+                            f"⏳ Tu suscripción *{plan_upper}* caduca en 3 días ({end_date}).\n"
+                            "Si quieres renovarla sin interrupciones, tienes tiempo de sobra."
+                            + renovar
+                        ),
+                        parse_mode="Markdown",
+                    )
+                    _avisos_enviados.add(aviso_key)
+
+            elif days_left == 2:
+                aviso_key = (user_id, "aviso_2")
+                if aviso_key not in _avisos_enviados:
+                    await context.bot.send_message(
+                        chat_id=int(user_id),
+                        text=(
+                            f"⏳ Tu suscripción *{plan_upper}* caduca en 2 días ({end_date}).\n"
+                            "Renueva hoy para no perder el acceso."
+                            + renovar
+                        ),
+                        parse_mode="Markdown",
+                    )
+                    _avisos_enviados.add(aviso_key)
 
             elif days_left == 1:
-                await context.bot.send_message(
-                    chat_id=int(user_id),
-                    text=(
-                        f"⚠️ Tu suscripción {record['plan'].upper()} caduca mañana "
-                        f"({end_date}).\n"
-                        "Si quieres renovar sin perder el acceso, envíame el comprobante hoy."
-                    ),
-                )
+                aviso_key = (user_id, "aviso_1")
+                if aviso_key not in _avisos_enviados:
+                    await context.bot.send_message(
+                        chat_id=int(user_id),
+                        text=(
+                            f"⚠️ Tu suscripción *{plan_upper}* caduca *mañana* ({end_date}).\n"
+                            "Si renuevas hoy, el acceso no se interrumpe."
+                            + renovar
+                        ),
+                        parse_mode="Markdown",
+                    )
+                    _avisos_enviados.add(aviso_key)
 
             elif days_left == 0:
-                await context.bot.send_message(
-                    chat_id=int(user_id),
-                    text=(
-                        f"⚠️ Tu suscripción {record['plan'].upper()} caduca hoy "
-                        f"({end_date}).\n"
-                        "Si quieres renovar, envíame el comprobante aquí."
-                    ),
-                )
+                aviso_key = (user_id, "aviso_0")
+                if aviso_key not in _avisos_enviados:
+                    await context.bot.send_message(
+                        chat_id=int(user_id),
+                        text=(
+                            f"⚠️ Tu suscripción *{plan_upper}* caduca *hoy* ({end_date}).\n"
+                            "Es el último día — si renuevas antes de medianoche el acceso continúa."
+                            + renovar
+                        ),
+                        parse_mode="Markdown",
+                    )
+                    _avisos_enviados.add(aviso_key)
 
             elif days_left < 0:
                 await expulsar_de_canales(context, int(user_id), record["plan"])
@@ -1582,10 +1664,12 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                 await context.bot.send_message(
                     chat_id=int(user_id),
                     text=(
-                        f"❌ Tu suscripción {record['plan'].upper()} ha caducado.\n"
-                        "Se ha retirado tu acceso a los canales premium.\n"
-                        "Si quieres volver a activarla, envía de nuevo el comprobante."
+                        f"❌ Tu suscripción *{plan_upper}* ha caducado.\n"
+                        "Se ha retirado tu acceso a los canales premium.\n\n"
+                        "Si quieres volver a activarla:"
+                        + renovar
                     ),
+                    parse_mode="Markdown",
                 )
                 logger.info(f"Suscripción caducada y usuario expulsado: {user_id}")
 
