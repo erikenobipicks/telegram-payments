@@ -951,7 +951,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if plan.startswith("bizum:"):
         _, plan_real = plan.split(":", 1)
-        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO}
+        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre": PRECIO_PRE}
         importe  = importes.get(plan_real, "consultar")
         # Formatear número Bizum limpio
         bizum_fmt = BIZUM.replace("+34", "\\+34")
@@ -974,7 +974,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if plan.startswith("revolut:"):
         _, plan_real = plan.split(":", 1)
-        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO}
+        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre": PRECIO_PRE}
         importe  = importes.get(plan_real, "consultar")
         revolut_escaped = REVOLUT_LINK.replace(".", "\\.").replace("-", "\\-")
         await query.edit_message_text(
@@ -996,6 +996,15 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if plan == "obtener_acceso":
         await callback_obtener_acceso(update, context)
         return
+
+    # Callback desconocido (botón antiguo en el historial del chat)
+    logger.warning("callback_data desconocido: %r (user %s)", plan, user.id)
+    await query.edit_message_text(
+        "Este botón ha caducado. Usa /start para ver el menú actualizado.",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🏠 Ir al menú", callback_data="menu")]]
+        ),
+    )
 
 
 async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1658,16 +1667,15 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             days_left = (end_date - today).days
 
-            # Clave de deduplicación: (user_id, "aviso_N_dias")
-            # Evita enviar el mismo aviso dos veces en el mismo día si el job
-            # se ejecuta varias veces (o si el proceso se reinicia).
-            aviso_key: tuple[int, str] | None = None
-
+            # Clave de deduplicación: (user_id, "aviso_N_dias", fecha_fin)
+            # Incluir fecha_fin evita que una renovación anule los avisos del
+            # siguiente ciclo (sin la fecha, las claves colisionarían).
+            fecha_str  = str(end_date)
             plan_upper = record["plan"].upper()
             renovar    = _instrucciones_renovacion(record["plan"])
 
             if days_left == 3:
-                aviso_key = (user_id, "aviso_3")
+                aviso_key = (user_id, "aviso_3", fecha_str)
                 if aviso_key not in _avisos_enviados:
                     await context.bot.send_message(
                         chat_id=int(user_id),
@@ -1681,7 +1689,7 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     _avisos_enviados.add(aviso_key)
 
             elif days_left == 2:
-                aviso_key = (user_id, "aviso_2")
+                aviso_key = (user_id, "aviso_2", fecha_str)
                 if aviso_key not in _avisos_enviados:
                     await context.bot.send_message(
                         chat_id=int(user_id),
@@ -1695,7 +1703,7 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     _avisos_enviados.add(aviso_key)
 
             elif days_left == 1:
-                aviso_key = (user_id, "aviso_1")
+                aviso_key = (user_id, "aviso_1", fecha_str)
                 if aviso_key not in _avisos_enviados:
                     await context.bot.send_message(
                         chat_id=int(user_id),
@@ -1709,7 +1717,7 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     _avisos_enviados.add(aviso_key)
 
             elif days_left == 0:
-                aviso_key = (user_id, "aviso_0")
+                aviso_key = (user_id, "aviso_0", fecha_str)
                 if aviso_key not in _avisos_enviados:
                     await context.bot.send_message(
                         chat_id=int(user_id),
@@ -1747,6 +1755,25 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         except Exception as e:
             logger.error(f"Error revisando expiración de {record.get('telegram_user_id')}: {e}")
+
+
+async def limpiar_pending_payments_antiguos(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Elimina entradas de pending_payments con más de 7 días.
+    Evita que usuarios que abrieron el bot pero nunca pagaron acumulen
+    registros huérfanos indefinidamente.
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM pending_payments WHERE created_at < NOW() - INTERVAL '7 days'"
+                )
+                borrados = cur.rowcount
+        if borrados:
+            logger.info("Limpieza pending_payments: %d registros huérfanos eliminados.", borrados)
+    except Exception as e:
+        logger.error("Error en limpieza de pending_payments: %s", e)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1806,6 +1833,11 @@ def main() -> None:
         check_expirations,
         interval=CHECK_EXPIRATIONS_EVERY_SECONDS,
         first=20,
+    )
+    app.job_queue.run_repeating(
+        limpiar_pending_payments_antiguos,
+        interval=7 * 24 * 60 * 60,   # cada 7 días
+        first=300,
     )
 
     logger.info(
