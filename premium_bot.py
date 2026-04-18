@@ -574,6 +574,36 @@ async def expulsar_de_canales(context: ContextTypes.DEFAULT_TYPE, user_id: int, 
             logger.error(f"Error expulsando {user_id} de {chat_id}: {e}")
 
 
+async def _expulsar_canales_obsoletos(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    plan_viejo: str | None,
+    plan_nuevo: str,
+) -> None:
+    """
+    Expulsa al usuario de los canales que tenía con el plan anterior
+    y que NO están incluidos en el nuevo plan.
+    Ejemplo: COMBO → GOLES expulsa del canal CORNERS.
+    """
+    if not plan_viejo or plan_viejo == plan_nuevo:
+        return
+    canales_viejos = {chat_id for _, chat_id in get_plan_channels(plan_viejo)}
+    canales_nuevos = {chat_id for _, chat_id in get_plan_channels(plan_nuevo)}
+    for chat_id in canales_viejos - canales_nuevos:
+        try:
+            await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+            await context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
+            logger.info(
+                "Usuario %s expulsado de %s por cambio de plan %s → %s",
+                user_id, chat_id, plan_viejo, plan_nuevo,
+            )
+        except Exception as e:
+            logger.error(
+                "Error expulsando %s de %s en cambio de plan: %s",
+                user_id, chat_id, e,
+            )
+
+
 # ==============================
 # MARKUPS
 # ==============================
@@ -1089,12 +1119,25 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 )
                 return
 
+            # Plan actual en DB (para detectar cambio de plan)
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT plan FROM users WHERE telegram_user_id = %s",
+                        (user_id_int,),
+                    )
+                    row = cur.fetchone()
+                    plan_anterior = row["plan"] if row else None
+
             record = extend_subscription(
                 user_id=user_id_int,
                 username=pending["username"],
                 full_name=pending["full_name"],
                 plan=plan,
             )
+
+            # Si cambió de plan, expulsar de los canales que ya no le corresponden
+            await _expulsar_canales_obsoletos(context, user_id_int, plan_anterior, plan)
 
             registrar_acceso_pendiente(user_id_int, plan)
             delete_pending_payment(user_id_int)
@@ -1183,12 +1226,25 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Ese usuario no está en pendientes.")
         return
 
+    # Plan actual en DB (para detectar cambio de plan)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT plan FROM users WHERE telegram_user_id = %s",
+                (target_user_id,),
+            )
+            row = cur.fetchone()
+            plan_anterior = row["plan"] if row else None
+
     record = extend_subscription(
         user_id=target_user_id,
         username=pending["username"],
         full_name=pending["full_name"],
         plan=plan,
     )
+
+    # Si cambió de plan, expulsar de los canales que ya no le corresponden
+    await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
 
     registrar_acceso_pendiente(target_user_id, plan)
     delete_pending_payment(target_user_id)
@@ -1449,7 +1505,8 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    plan = plan_nuevo or existing["plan"]
+    plan_anterior = existing["plan"] if existing else None
+    plan          = plan_nuevo or plan_anterior
     if plan not in ("goles", "corners", "combo", "pre"):
         await update.message.reply_text("Plan no válido. Usa: goles, corners, pre o combo")
         return
@@ -1463,6 +1520,9 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         full_name=full_name,
         plan=plan,
     )
+
+    # Si cambió de plan, expulsar de los canales que ya no le corresponden
+    await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
 
     registrar_acceso_pendiente(target_user_id, plan)
 
