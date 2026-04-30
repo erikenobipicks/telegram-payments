@@ -299,17 +299,20 @@ def _get_strike_tipo(stats: dict | None, tipo: str) -> str | None:
     Devuelve el strike del último mes para un tipo_pick ("gol" / "corner").
     Si no hay datos del último mes, usa el global.
     Devuelve None si no hay datos en absoluto.
+
+    El `.` decimal va escapado para que el valor pueda inyectarse
+    directamente en mensajes con parse_mode="MarkdownV2".
     """
     if not stats:
         return None
     ultimo_mes = stats.get("ultimo_mes", {})
     if tipo in ultimo_mes:
         row = ultimo_mes[tipo]
-        return f"{calcular_strike(row['hits'], row['misses'])}%"
+        return f"{calcular_strike(row['hits'], row['misses'])}%".replace(".", "\\.")
     globales = stats.get("globales", {})
     if tipo in globales:
         row = globales[tipo]
-        return f"{calcular_strike(row['hits'], row['misses'])}%"
+        return f"{calcular_strike(row['hits'], row['misses'])}%".replace(".", "\\.")
     return None
 
 
@@ -707,8 +710,8 @@ def menu_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⚽ GOLES — 20€",   callback_data="goles"),
             InlineKeyboardButton("🚩 CORNERS — 20€", callback_data="corners"),
         ],
-        [InlineKeyboardButton("📊 PREPARTIDO — 20€", callback_data="pre")],
         [InlineKeyboardButton("🔥 COMBO — 30€",      callback_data="combo")],
+        [InlineKeyboardButton("📊 PREPARTIDO — 20€", callback_data="pre")],
         [InlineKeyboardButton("💬 Contacto",          url="https://t.me/erikenobi")],
     ])
 
