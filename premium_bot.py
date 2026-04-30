@@ -81,6 +81,7 @@ STRIPE_COMBO   = "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
 STRIPE_PRE     = "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
 
 PLAN_DAYS    = 30
+TRIAL_DAYS   = 3
 INVITE_EXPIRY_HOURS = 1
 CHECK_EXPIRATIONS_EVERY_SECONDS = 43200  # 12h
 
@@ -170,6 +171,15 @@ def init_db():
                     telegram_user_id BIGINT PRIMARY KEY,
                     plan             TEXT NOT NULL,
                     approved_at      TIMESTAMP NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trials (
+                    telegram_user_id BIGINT PRIMARY KEY,
+                    plan             TEXT NOT NULL,
+                    used_at          TIMESTAMP NOT NULL DEFAULT NOW()
                 );
                 """
             )
@@ -514,6 +524,83 @@ def delete_pending_payment(user_id: int) -> None:
 
 
 # ==============================
+# DB — TRIALS
+# ==============================
+
+def has_used_trial(user_id: int) -> bool:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM trials WHERE telegram_user_id = %s",
+                (user_id,),
+            )
+            return cur.fetchone() is not None
+
+
+def tiene_suscripcion_activa(user_id: int) -> bool:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT fecha_fin FROM users WHERE telegram_user_id = %s AND estado = 'activo'",
+                (user_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return False
+    fecha_fin = row["fecha_fin"]
+    if isinstance(fecha_fin, str):
+        fecha_fin = parse_date(fecha_fin)
+    return fecha_fin >= today_date()
+
+
+def start_trial(user_id: int, username: str | None, full_name: str, plan: str):
+    """
+    Activa una prueba gratuita de TRIAL_DAYS días.
+    No extiende suscripciones existentes: la fecha_fin se fija a today+TRIAL_DAYS.
+    Marca al usuario en la tabla trials para impedir reclamarla otra vez.
+    """
+    today = today_date()
+    new_expiry = today + timedelta(days=TRIAL_DAYS)
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO users (
+                        telegram_user_id, username, full_name, plan,
+                        fecha_inicio, fecha_fin, estado, created_at, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, 'activo', NOW(), NOW())
+                    ON CONFLICT (telegram_user_id)
+                    DO UPDATE SET
+                        username     = EXCLUDED.username,
+                        full_name    = EXCLUDED.full_name,
+                        plan         = EXCLUDED.plan,
+                        fecha_inicio = EXCLUDED.fecha_inicio,
+                        fecha_fin    = EXCLUDED.fecha_fin,
+                        estado       = 'activo',
+                        updated_at   = NOW()
+                    RETURNING telegram_user_id, username, full_name, plan, fecha_inicio, fecha_fin, estado
+                    """,
+                    (user_id, username, full_name, plan, today, new_expiry),
+                )
+                record = cur.fetchone()
+                cur.execute(
+                    """
+                    INSERT INTO trials (telegram_user_id, plan, used_at)
+                    VALUES (%s, %s, NOW())
+                    ON CONFLICT (telegram_user_id) DO NOTHING
+                    """,
+                    (user_id, plan),
+                )
+                return record
+    except Exception as e:
+        logger.error("Error en start_trial para %s: %s", user_id, e)
+        raise
+
+
+# ==============================
 # DB — USERS / SUBSCRIPTIONS
 # ==============================
 
@@ -638,7 +725,12 @@ def pago_markup(plan: str) -> InlineKeyboardMarkup:
     importe = precios.get(plan, "")
 
     stripe_url = stripes.get(plan, "")
-    keyboard = []
+    keyboard = [
+        [InlineKeyboardButton(
+            f"🎁 Probar gratis {TRIAL_DAYS} días",
+            callback_data=f"trial:{plan}",
+        )],
+    ]
     if stripe_url:
         keyboard.append([InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=stripe_url)])
     keyboard += [
@@ -946,6 +1038,67 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "Selecciona tu método de pago:",
             reply_markup=pago_markup("combo"),
             parse_mode="MarkdownV2",
+        )
+        return
+
+    if plan.startswith("trial:"):
+        _, plan_real = plan.split(":", 1)
+        if plan_real not in ("goles", "corners", "combo", "pre"):
+            await query.edit_message_text(
+                "Plan no válido para la prueba.",
+                reply_markup=volver_markup(),
+            )
+            return
+
+        if has_used_trial(user.id):
+            await query.edit_message_text(
+                "🎁 *Prueba gratuita ya usada*\n\n"
+                "Solo se permite una prueba de 3 días por usuario y ya has reclamado la tuya\\.\n\n"
+                "Si quieres seguir disfrutando del servicio, elige un plan en el menú\\.",
+                reply_markup=volver_markup(),
+                parse_mode="MarkdownV2",
+            )
+            return
+
+        if tiene_suscripcion_activa(user.id):
+            await query.edit_message_text(
+                "Ya tienes una suscripción activa, así que no necesitas la prueba 🙌\n\n"
+                "Si quieres cambiar de plan, escríbeme: @erikenobi",
+                reply_markup=volver_markup(),
+            )
+            return
+
+        try:
+            record = start_trial(
+                user_id=user.id,
+                username=user.username,
+                full_name=user.full_name,
+                plan=plan_real,
+            )
+        except Exception as e:
+            logger.error("Error iniciando trial para %s: %s", user.id, e)
+            await query.edit_message_text(
+                "⚠️ Ha habido un error activando tu prueba. Escríbeme: @erikenobi",
+                reply_markup=volver_markup(),
+            )
+            return
+
+        registrar_acceso_pendiente(user.id, plan_real)
+        delete_pending_payment(user.id)
+
+        await query.edit_message_text(
+            "✅ *Prueba gratuita activada*\n\n"
+            f"Plan: *{plan_real.upper()}*\n"
+            f"Duración: *{TRIAL_DAYS} días*\n"
+            f"Válida hasta: *{record['fecha_fin']}*\n\n"
+            "Pulsa el botón para obtener tu acceso al canal.\n"
+            "Cuando caduque podrás seguir suscrito eligiendo un plan de pago.",
+            reply_markup=acceso_listo_markup(),
+            parse_mode="Markdown",
+        )
+        logger.info(
+            "Trial activado: user %s | plan %s | hasta %s",
+            user.id, plan_real, record["fecha_fin"],
         )
         return
 
