@@ -710,7 +710,7 @@ def menu_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⚽ GOLES — 20€",   callback_data="goles"),
             InlineKeyboardButton("🚩 CORNERS — 20€", callback_data="corners"),
         ],
-        [InlineKeyboardButton("🔥 COMBO — 30€",      callback_data="combo")],
+        [InlineKeyboardButton("🔥 GOLES + CORNERS — 30€", callback_data="combo")],
         [InlineKeyboardButton("📊 PREPARTIDO — 20€", callback_data="pre")],
         [InlineKeyboardButton("💬 Contacto",          url="https://t.me/erikenobi")],
     ])
