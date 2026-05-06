@@ -540,6 +540,39 @@ def has_used_trial(user_id: int) -> bool:
             return cur.fetchone() is not None
 
 
+def es_trial_actual(user_id: int, fecha_inicio, fecha_fin) -> bool:
+    """
+    Determina si la fila actual de `users` para `user_id` corresponde
+    al periodo de prueba (no a una suscripción de pago).
+
+    El trial fija fecha_inicio = used_at::date y fecha_fin = used_at + TRIAL_DAYS.
+    Cualquier pago posterior llama a extend_subscription, que reescribe
+    fecha_inicio al día del pago, así que la igualdad se rompe.
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT used_at FROM trials WHERE telegram_user_id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return False
+
+    used_at = row["used_at"]
+    used_date = used_at.date() if hasattr(used_at, "date") else parse_date(str(used_at)[:10])
+
+    if isinstance(fecha_inicio, str):
+        fecha_inicio = parse_date(fecha_inicio)
+    if isinstance(fecha_fin, str):
+        fecha_fin = parse_date(fecha_fin)
+
+    return (
+        fecha_inicio == used_date
+        and fecha_fin == used_date + timedelta(days=TRIAL_DAYS)
+    )
+
+
 def tiene_suscripcion_activa(user_id: int) -> bool:
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -950,10 +983,10 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "\n\n"
         "─────────────────\n"
         "📋 *¿Cómo activar el acceso?*\n"
-        "1️⃣ Realiza el pago\n"
-        "2️⃣ Captura de pantalla del comprobante\n"
+        "1️⃣ Paga por *cualquier método* \\(Stripe, PayPal, Bizum o Revolut\\)\n"
+        "2️⃣ Captura del comprobante o del email de confirmación\n"
         "3️⃣ *Envía la captura aquí, en este chat* ⬅️\n"
-        "⏱ Acceso activado en el mismo día"
+        "⏱ Acceso activado el mismo día \\(también si pagas con tarjeta vía Stripe\\)"
     )
 
     # ── Plan GOLES ──────────────────────────────────────────────────────
@@ -1088,6 +1121,21 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         registrar_acceso_pendiente(user.id, plan_real)
         delete_pending_payment(user.id)
+
+        username_admin = f"@{user.username}" if user.username else "(sin username)"
+        texto_admin = (
+            "🎁 Trial activado\n\n"
+            f"Usuario: {user.full_name}\n"
+            f"Username: {username_admin}\n"
+            f"User ID: {user.id}\n"
+            f"Plan: {plan_real}\n"
+            f"Válido hasta: {record['fecha_fin']}"
+        )
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=texto_admin)
+            except Exception as e:
+                logger.error(f"Error avisando trial al admin {admin_id}: {e}")
 
         await query.edit_message_text(
             "✅ *Prueba gratuita activada*\n\n"
@@ -1643,6 +1691,83 @@ async def activos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(texto[:4000])
 
 
+async def trials_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lista los trials usados con un resumen de conversión a pago."""
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT t.telegram_user_id, t.plan AS plan_trial, t.used_at,
+                       u.fecha_inicio, u.fecha_fin, u.estado, u.plan AS plan_actual,
+                       u.full_name, u.username
+                FROM trials t
+                LEFT JOIN users u ON u.telegram_user_id = t.telegram_user_id
+                ORDER BY t.used_at DESC
+                """
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("No hay trials registrados.")
+        return
+
+    today = today_date()
+    total = len(rows)
+    convertidos = 0
+    en_trial    = 0
+    expirados   = 0
+    lineas      = []
+
+    for row in rows:
+        used_at = row["used_at"]
+        used_date = used_at.date() if hasattr(used_at, "date") else parse_date(str(used_at)[:10])
+
+        fecha_inicio = row["fecha_inicio"]
+        fecha_fin    = row["fecha_fin"]
+        if isinstance(fecha_inicio, str):
+            fecha_inicio = parse_date(fecha_inicio)
+        if isinstance(fecha_fin, str):
+            fecha_fin = parse_date(fecha_fin)
+
+        # "Es la fila del trial actual" = fecha_inicio == used_at::date
+        # y fecha_fin <= used_at::date + TRIAL_DAYS (no se extendió)
+        es_fila_trial = (
+            fecha_inicio is not None
+            and fecha_fin is not None
+            and fecha_inicio == used_date
+            and fecha_fin <= used_date + timedelta(days=TRIAL_DAYS)
+        )
+
+        if row["estado"] == "activo" and fecha_fin and fecha_fin >= today:
+            if es_fila_trial:
+                en_trial += 1
+                marca = f"🎁 trial ({fecha_fin})"
+            else:
+                convertidos += 1
+                marca = f"💰 pagó ({row['plan_actual']}, hasta {fecha_fin})"
+        else:
+            expirados += 1
+            marca = "⌛ sin sub"
+
+        nombre = row["full_name"] or f"User {row['telegram_user_id']}"
+        username = f"@{row['username']}" if row["username"] else ""
+        lineas.append(
+            f"{row['telegram_user_id']} | {nombre} {username} | trial:{row['plan_trial']} | {marca}"
+        )
+
+    cabecera = (
+        f"🎁 Trials: {total} totales\n"
+        f"💰 Convertidos a pago: {convertidos}\n"
+        f"🎁 Trial en curso: {en_trial}\n"
+        f"⌛ Expirados sin pagar: {expirados}\n\n"
+    )
+    await update.message.reply_text((cabecera + "\n".join(lineas))[:4000])
+
+
 async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Extiende manualmente la suscripción de un usuario sin pasar por el flujo de pago.
@@ -1805,7 +1930,7 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT telegram_user_id, plan, fecha_fin, estado
+                SELECT telegram_user_id, plan, fecha_inicio, fecha_fin, estado
                 FROM users
                 WHERE estado = 'activo'
                   AND fecha_fin <= %s
@@ -1829,8 +1954,11 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
             fecha_str  = str(end_date)
             plan_upper = record["plan"].upper()
             renovar    = _instrucciones_renovacion(record["plan"])
+            es_trial   = es_trial_actual(user_id, record["fecha_inicio"], end_date)
 
-            if days_left == 3:
+            # Para usuarios en trial saltamos el aviso de 3 días: lo activan
+            # y lo recibirían inmediatamente, lo que es ruido innecesario.
+            if days_left == 3 and not es_trial:
                 aviso_key = (user_id, "aviso_3", fecha_str)
                 if aviso_key not in _avisos_enviados:
                     await context.bot.send_message(
@@ -1847,13 +1975,21 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
             elif days_left == 2:
                 aviso_key = (user_id, "aviso_2", fecha_str)
                 if aviso_key not in _avisos_enviados:
-                    await context.bot.send_message(
-                        chat_id=int(user_id),
-                        text=(
+                    if es_trial:
+                        texto = (
+                            f"🎁 Tu *prueba gratuita* de *{plan_upper}* caduca en 2 días ({end_date}).\n"
+                            "Si quieres seguir disfrutando del servicio, elige un plan:"
+                            + renovar
+                        )
+                    else:
+                        texto = (
                             f"⏳ Tu suscripción *{plan_upper}* caduca en 2 días ({end_date}).\n"
                             "Renueva hoy para no perder el acceso."
                             + renovar
-                        ),
+                        )
+                    await context.bot.send_message(
+                        chat_id=int(user_id),
+                        text=texto,
                         parse_mode="Markdown",
                     )
                     _avisos_enviados.add(aviso_key)
@@ -1861,13 +1997,21 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
             elif days_left == 1:
                 aviso_key = (user_id, "aviso_1", fecha_str)
                 if aviso_key not in _avisos_enviados:
-                    await context.bot.send_message(
-                        chat_id=int(user_id),
-                        text=(
+                    if es_trial:
+                        texto = (
+                            f"🎁 Tu *prueba gratuita* de *{plan_upper}* caduca *mañana* ({end_date}).\n"
+                            "Si quieres mantener el acceso, elige un plan hoy:"
+                            + renovar
+                        )
+                    else:
+                        texto = (
                             f"⚠️ Tu suscripción *{plan_upper}* caduca *mañana* ({end_date}).\n"
                             "Si renuevas hoy, el acceso no se interrumpe."
                             + renovar
-                        ),
+                        )
+                    await context.bot.send_message(
+                        chat_id=int(user_id),
+                        text=texto,
                         parse_mode="Markdown",
                     )
                     _avisos_enviados.add(aviso_key)
@@ -1875,13 +2019,21 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
             elif days_left == 0:
                 aviso_key = (user_id, "aviso_0", fecha_str)
                 if aviso_key not in _avisos_enviados:
-                    await context.bot.send_message(
-                        chat_id=int(user_id),
-                        text=(
+                    if es_trial:
+                        texto = (
+                            f"🎁 *Hoy es el último día* de tu prueba gratuita de *{plan_upper}* ({end_date}).\n"
+                            "Si te ha gustado y quieres seguir, elige un plan antes de medianoche:"
+                            + renovar
+                        )
+                    else:
+                        texto = (
                             f"⚠️ Tu suscripción *{plan_upper}* caduca *hoy* ({end_date}).\n"
                             "Es el último día — si renuevas antes de medianoche el acceso continúa."
                             + renovar
-                        ),
+                        )
+                    await context.bot.send_message(
+                        chat_id=int(user_id),
+                        text=texto,
                         parse_mode="Markdown",
                     )
                     _avisos_enviados.add(aviso_key)
@@ -1897,17 +2049,29 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                             (user_id,),
                         )
 
-                await context.bot.send_message(
-                    chat_id=int(user_id),
-                    text=(
+                if es_trial:
+                    texto = (
+                        f"🎁 Tu prueba gratuita de *{plan_upper}* ha terminado.\n"
+                        "Se ha retirado tu acceso al canal.\n\n"
+                        "Si quieres seguir disfrutando del servicio, elige un plan:"
+                        + renovar
+                    )
+                else:
+                    texto = (
                         f"❌ Tu suscripción *{plan_upper}* ha caducado.\n"
                         "Se ha retirado tu acceso a los canales premium.\n\n"
                         "Si quieres volver a activarla:"
                         + renovar
-                    ),
+                    )
+                await context.bot.send_message(
+                    chat_id=int(user_id),
+                    text=texto,
                     parse_mode="Markdown",
                 )
-                logger.info(f"Suscripción caducada y usuario expulsado: {user_id}")
+                logger.info(
+                    "Suscripción caducada y usuario expulsado: %s (trial=%s)",
+                    user_id, es_trial,
+                )
 
         except Exception as e:
             logger.error(f"Error revisando expiración de {record.get('telegram_user_id')}: {e}")
@@ -1968,6 +2132,7 @@ def main() -> None:
     app.add_handler(CommandHandler("listar",        listar))
     app.add_handler(CommandHandler("pendientes",    pendientes))
     app.add_handler(CommandHandler("caducan",       caducan))
+    app.add_handler(CommandHandler("trials",        trials_admin))
     app.add_handler(CommandHandler("activos",       activos))
     app.add_handler(CommandHandler("expulsar",      expulsar))
     app.add_handler(CommandHandler("renovar",       renovar))
