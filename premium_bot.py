@@ -183,6 +183,16 @@ def init_db():
                 );
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bot_visitors (
+                    telegram_user_id BIGINT PRIMARY KEY,
+                    username         TEXT,
+                    full_name        TEXT,
+                    first_seen_at    TIMESTAMP NOT NULL DEFAULT NOW()
+                );
+                """
+            )
     logger.info("Base de datos inicializada.")
 
 
@@ -799,6 +809,28 @@ def acceso_listo_markup() -> InlineKeyboardMarkup:
     )
 
 
+def registrar_visitante(user_id: int, username: str | None, full_name: str) -> bool:
+    """
+    Registra al usuario en bot_visitors si es la primera vez.
+    Devuelve True si era nuevo, False si ya estaba.
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO bot_visitors (telegram_user_id, username, full_name)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (telegram_user_id) DO NOTHING
+                    """,
+                    (user_id, username, full_name),
+                )
+                return cur.rowcount == 1
+    except Exception as e:
+        logger.error("Error registrando visitante %s: %s", user_id, e)
+        return False
+
+
 # ==============================
 # USER FLOW
 # ==============================
@@ -807,6 +839,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
 
     if user:
+        if registrar_visitante(user.id, user.username, user.full_name):
+            username_admin = f"@{user.username}" if user.username else "(sin username)"
+            texto_admin = (
+                "👤 Nuevo usuario en el bot\n\n"
+                f"Nombre: {user.full_name}\n"
+                f"Username: {username_admin}\n"
+                f"User ID: {user.id}"
+            )
+            for admin_id in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(chat_id=admin_id, text=texto_admin)
+                except Exception as e:
+                    logger.error(f"Error avisando nuevo usuario al admin {admin_id}: {e}")
+
         acceso = get_acceso_pendiente(user.id)
         if acceso:
             await update.message.reply_text(
