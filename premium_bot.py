@@ -435,7 +435,22 @@ def parse_date(date_str: str):
     return datetime.strptime(str(date_str), "%Y-%m-%d").date()
 
 
+# Algunos usuarios antiguos están registrados con nombres de plan que ya
+# no se usan en el bot (p.ej. `pre_o25` para PREPARTIDO Over 2.5). Este
+# diccionario los normaliza al nombre canónico antes de cualquier lookup.
+_PLAN_ALIASES = {
+    "pre_o25": "pre",
+}
+
+
+def canonical_plan(plan: str | None) -> str | None:
+    if plan is None:
+        return None
+    return _PLAN_ALIASES.get(plan, plan)
+
+
 def get_plan_channels(plan: str) -> list[tuple[str, int]]:
+    plan = canonical_plan(plan)
     if plan == "goles":
         return [("⚽ GOLES", CANAL_GOLES_ID)]
     if plan == "corners":
@@ -697,14 +712,30 @@ def extend_subscription(user_id: int, username: str | None, full_name: str, plan
         raise
 
 
-async def expulsar_de_canales(context: ContextTypes.DEFAULT_TYPE, user_id: int, plan: str) -> None:
-    for _, chat_id in get_plan_channels(plan):
+async def expulsar_de_canales(context: ContextTypes.DEFAULT_TYPE, user_id: int, plan: str) -> bool:
+    """
+    Intenta expulsar al usuario de todos los canales que cubre el plan.
+    Devuelve True si TODOS los bans salieron bien, False en cuanto uno falle
+    (o si el plan no tiene canales asociados).
+    """
+    canales = get_plan_channels(plan)
+    if not canales:
+        logger.error(
+            "Plan desconocido '%s' para user %s — no hay canales asociados, no se puede expulsar",
+            plan, user_id,
+        )
+        return False
+
+    all_ok = True
+    for _, chat_id in canales:
         try:
             await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
             await context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
             logger.info(f"Usuario {user_id} expulsado de {chat_id}")
         except Exception as e:
             logger.error(f"Error expulsando {user_id} de {chat_id}: {e}")
+            all_ok = False
+    return all_ok
 
 
 async def _expulsar_canales_obsoletos(
@@ -1628,7 +1659,7 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT telegram_user_id, plan, estado, fecha_fin
+                SELECT telegram_user_id, full_name, username, plan, estado, fecha_fin
                 FROM users ORDER BY fecha_fin ASC
                 """
             )
@@ -1640,8 +1671,11 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     lineas = ["📋 Usuarios activos/guardados:\n"]
     for row in rows:
+        nombre   = row["full_name"] or "?"
+        username = f"@{row['username']}" if row["username"] else "(sin @)"
         lineas.append(
-            f"{row['telegram_user_id']} | {row['plan']} | {row['estado']} | hasta {row['fecha_fin']}"
+            f"{row['telegram_user_id']} | {nombre} {username} | "
+            f"{row['plan']} | {row['estado']} | hasta {row['fecha_fin']}"
         )
     await update.message.reply_text("\n".join(lineas)[:4000])
 
@@ -1920,7 +1954,7 @@ async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Ese usuario no está registrado.")
         return
 
-    await expulsar_de_canales(context, target_user_id, record["plan"])
+    ok = await expulsar_de_canales(context, target_user_id, record["plan"])
     borrar_acceso_pendiente(target_user_id)
 
     with get_conn() as conn:
@@ -1930,9 +1964,63 @@ async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 (target_user_id,),
             )
 
-    await update.message.reply_text(
-        f"Usuario {target_user_id} expulsado y marcado como caducado."
-    )
+    if ok:
+        await update.message.reply_text(
+            f"✅ Usuario {target_user_id} expulsado y marcado como caducado."
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ Usuario {target_user_id} marcado como caducado, pero el ban falló "
+            "en alguno de los canales. Revisa los permisos del bot y reintenta con /reexpulsar."
+        )
+
+
+async def reexpulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Reintenta expulsar a todos los usuarios marcados como 'caducado'
+    cuya fecha_fin ya pasó. Útil para recuperar a los que se quedaron
+    atascados por errores transitorios del ban.
+    """
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    today = today_date()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT telegram_user_id, plan, full_name, username, fecha_fin
+                FROM users
+                WHERE estado = 'caducado' AND fecha_fin < %s
+                ORDER BY fecha_fin ASC
+                """,
+                (today,),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("No hay usuarios caducados pendientes de expulsar.")
+        return
+
+    lineas = []
+    ok_count = 0
+    for row in rows:
+        user_id  = row["telegram_user_id"]
+        plan     = row["plan"]
+        nombre   = row["full_name"] or f"User {user_id}"
+        try:
+            ok = await expulsar_de_canales(context, int(user_id), plan)
+        except Exception as e:
+            logger.error("Error en /reexpulsar para %s: %s", user_id, e)
+            ok = False
+        if ok:
+            ok_count += 1
+        marca = "✅" if ok else "❌"
+        lineas.append(f"{marca} {user_id} | {nombre} | {plan} | fin {row['fecha_fin']}")
+
+    cabecera = f"🔁 Reexpulsión: {ok_count}/{len(rows)} OK\n\n"
+    await update.message.reply_text((cabecera + "\n".join(lineas))[:4000])
     logger.info(f"Admin expulsó manualmente al usuario {target_user_id}")
 
 
@@ -1945,6 +2033,7 @@ def _instrucciones_renovacion(plan: str) -> str:
     Devuelve el bloque de texto con precio, métodos de pago y pasos
     que se incluye en todos los avisos de expiración.
     """
+    plan = canonical_plan(plan)
     precios  = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre": PRECIO_PRE}
     stripes  = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO, "pre": STRIPE_PRE}
 
@@ -2085,7 +2174,7 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     _avisos_enviados.add(aviso_key)
 
             elif days_left < 0:
-                await expulsar_de_canales(context, int(user_id), record["plan"])
+                expulsado_ok = await expulsar_de_canales(context, int(user_id), record["plan"])
                 borrar_acceso_pendiente(user_id)
 
                 with get_conn() as conn:
@@ -2115,12 +2204,57 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     parse_mode="Markdown",
                 )
                 logger.info(
-                    "Suscripción caducada y usuario expulsado: %s (trial=%s)",
-                    user_id, es_trial,
+                    "Suscripción caducada y usuario expulsado: %s (trial=%s, ban_ok=%s)",
+                    user_id, es_trial, expulsado_ok,
                 )
+
+                # Si la expulsión falló, avisar al admin (la job reintentará
+                # automáticamente cada ciclo en la segunda pasada).
+                if not expulsado_ok:
+                    for admin_id in ADMIN_IDS:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=admin_id,
+                                text=(
+                                    f"⚠️ No se pudo expulsar al usuario {user_id} "
+                                    f"({record['plan']}) tras caducar.\n"
+                                    "Está marcado como caducado pero sigue en el canal.\n"
+                                    "Se reintentará automáticamente cada 12h. "
+                                    "Usa /reexpulsar para forzarlo ahora."
+                                ),
+                            )
+                        except Exception as e:
+                            logger.error("Error avisando expulsión fallida al admin %s: %s", admin_id, e)
 
         except Exception as e:
             logger.error(f"Error revisando expiración de {record.get('telegram_user_id')}: {e}")
+
+    # ── Segunda pasada: reintentar expulsión de usuarios que ya están
+    # marcados como `caducado` pero pueden seguir en el canal porque
+    # el ban falló en su momento.
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT telegram_user_id, plan
+                FROM users
+                WHERE estado = 'caducado' AND fecha_fin < %s
+                """,
+                (today,),
+            )
+            pendientes = cur.fetchall()
+
+    for record in pendientes:
+        try:
+            user_id = record["telegram_user_id"]
+            ok = await expulsar_de_canales(context, int(user_id), record["plan"])
+            if ok:
+                logger.info("Reintento de expulsión exitoso: %s (%s)", user_id, record["plan"])
+        except Exception as e:
+            logger.error(
+                "Error en reintento de expulsión de %s: %s",
+                record.get("telegram_user_id"), e,
+            )
 
 
 async def limpiar_pending_payments_antiguos(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2181,6 +2315,7 @@ def main() -> None:
     app.add_handler(CommandHandler("trials",        trials_admin))
     app.add_handler(CommandHandler("activos",       activos))
     app.add_handler(CommandHandler("expulsar",      expulsar))
+    app.add_handler(CommandHandler("reexpulsar",    reexpulsar))
     app.add_handler(CommandHandler("renovar",       renovar))
 
     app.add_handler(CallbackQueryHandler(admin_action_callback, pattern=r"^(approve:|reject:)"))
