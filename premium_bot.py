@@ -193,6 +193,20 @@ def init_db():
                 );
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS encuestas (
+                    telegram_user_id BIGINT PRIMARY KEY,
+                    plan             TEXT,
+                    sent_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+                    razon            TEXT,
+                    valoracion       INTEGER,
+                    sugerencia       TEXT,
+                    responded_at     TIMESTAMP,
+                    awaiting_sugerencia BOOLEAN NOT NULL DEFAULT FALSE
+                );
+                """
+            )
     logger.info("Base de datos inicializada.")
 
 
@@ -659,6 +673,123 @@ def start_trial(user_id: int, username: str | None, full_name: str, plan: str):
     except Exception as e:
         logger.error("Error en start_trial para %s: %s", user_id, e)
         raise
+
+
+# ==============================
+# DB — ENCUESTAS DE SATISFACCIÓN
+# ==============================
+
+# Mapeo de razones (callback → texto humano).
+RAZONES_ENCUESTA = {
+    "precio":      "💸 Precio",
+    "aciertos":    "🎯 Pocos aciertos",
+    "actividad":   "😴 Poca actividad",
+    "afi":         "🚫 Cambié de afición",
+    "otro":        "❓ Otro motivo",
+}
+
+
+def get_encuesta(user_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT telegram_user_id, plan, sent_at, razon, valoracion,
+                       sugerencia, responded_at, awaiting_sugerencia
+                FROM encuestas WHERE telegram_user_id = %s
+                """,
+                (user_id,),
+            )
+            return cur.fetchone()
+
+
+def crear_encuesta(user_id: int, plan: str | None) -> bool:
+    """
+    Crea la fila de encuesta para este usuario si no existía.
+    Devuelve True si era nueva, False si ya estaba.
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO encuestas (telegram_user_id, plan)
+                    VALUES (%s, %s)
+                    ON CONFLICT (telegram_user_id) DO NOTHING
+                    """,
+                    (user_id, plan),
+                )
+                return cur.rowcount == 1
+    except Exception as e:
+        logger.error("Error creando encuesta para %s: %s", user_id, e)
+        return False
+
+
+def marcar_encuesta_rechazada(user_id: int) -> None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE encuestas SET responded_at = NOW(), razon = 'rechazada'
+                WHERE telegram_user_id = %s
+                """,
+                (user_id,),
+            )
+
+
+def guardar_razon_encuesta(user_id: int, razon: str) -> None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE encuestas SET razon = %s WHERE telegram_user_id = %s",
+                (razon, user_id),
+            )
+
+
+def guardar_valoracion_encuesta(user_id: int, valoracion: int) -> None:
+    """
+    Guarda la valoración y marca awaiting_sugerencia=TRUE para que
+    el siguiente mensaje de texto del usuario se trate como sugerencia.
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE encuestas
+                SET valoracion = %s, awaiting_sugerencia = TRUE
+                WHERE telegram_user_id = %s
+                """,
+                (valoracion, user_id),
+            )
+
+
+def guardar_sugerencia_encuesta(user_id: int, sugerencia: str) -> None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE encuestas
+                SET sugerencia = %s,
+                    awaiting_sugerencia = FALSE,
+                    responded_at = NOW()
+                WHERE telegram_user_id = %s
+                """,
+                (sugerencia, user_id),
+            )
+
+
+def cerrar_encuesta_sin_sugerencia(user_id: int) -> None:
+    """Cierra la encuesta dejando sugerencia=NULL y respondida=NOW."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE encuestas
+                SET awaiting_sugerencia = FALSE, responded_at = NOW()
+                WHERE telegram_user_id = %s
+                """,
+                (user_id,),
+            )
 
 
 # ==============================
@@ -1288,6 +1419,142 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
+# ==============================
+# ENCUESTA DE SATISFACCIÓN — UI
+# ==============================
+
+def _encuesta_inicial_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Sí, te ayudo",   callback_data="enc:start")],
+        [InlineKeyboardButton("❌ No, gracias",    callback_data="enc:no")],
+    ])
+
+
+def _encuesta_razon_markup() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton(texto, callback_data=f"enc:razon:{key}")]
+        for key, texto in RAZONES_ENCUESTA.items()
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _encuesta_valoracion_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⭐",     callback_data="enc:val:1"),
+            InlineKeyboardButton("⭐⭐",   callback_data="enc:val:2"),
+            InlineKeyboardButton("⭐⭐⭐", callback_data="enc:val:3"),
+        ],
+        [
+            InlineKeyboardButton("⭐⭐⭐⭐",   callback_data="enc:val:4"),
+            InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data="enc:val:5"),
+        ],
+    ])
+
+
+def _encuesta_skip_sugerencia_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Saltar — sin sugerencia", callback_data="enc:skip")]]
+    )
+
+
+async def enviar_encuesta_inicial(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    nombre: str,
+    plan: str | None,
+) -> bool:
+    """
+    Envía el mensaje inicial de la encuesta al usuario si no se le había
+    enviado ya. Devuelve True si se envió.
+    """
+    if not crear_encuesta(user_id, plan):
+        return False
+
+    saludo = f"👋 Hola {nombre}" if nombre else "👋 Hola"
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                f"{saludo},\n\n"
+                "Vi que tu suscripción terminó hace unos días y no la has renovado. "
+                "¿Te importa responder *2 preguntas rápidas* para mejorar el servicio? "
+                "Me ayudaría mucho saber qué podemos mejorar."
+            ),
+            reply_markup=_encuesta_inicial_markup(),
+            parse_mode="Markdown",
+        )
+        return True
+    except Exception as e:
+        logger.error("No se pudo enviar la encuesta inicial a %s: %s", user_id, e)
+        return False
+
+
+async def encuesta_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gestiona todos los callbacks `enc:*` de la encuesta."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    user = query.from_user
+
+    if data == "enc:no":
+        marcar_encuesta_rechazada(user.id)
+        await query.edit_message_text(
+            "Entendido. ¡Gracias igualmente! 🙏\n"
+            "Si en algún momento quieres volver, escribe /start."
+        )
+        return
+
+    if data == "enc:start":
+        await query.edit_message_text(
+            "*1/2 — ¿Cuál fue el motivo principal para no renovar?*",
+            reply_markup=_encuesta_razon_markup(),
+            parse_mode="Markdown",
+        )
+        return
+
+    if data.startswith("enc:razon:"):
+        razon = data.split(":", 2)[2]
+        if razon not in RAZONES_ENCUESTA:
+            await query.edit_message_text("Opción no válida.")
+            return
+        guardar_razon_encuesta(user.id, razon)
+        await query.edit_message_text(
+            "*2/2 — ¿Cómo valoras el servicio en general?*",
+            reply_markup=_encuesta_valoracion_markup(),
+            parse_mode="Markdown",
+        )
+        return
+
+    if data.startswith("enc:val:"):
+        try:
+            valoracion = int(data.split(":", 2)[2])
+        except ValueError:
+            await query.edit_message_text("Valoración no válida.")
+            return
+        if valoracion < 1 or valoracion > 5:
+            await query.edit_message_text("Valoración fuera de rango.")
+            return
+        guardar_valoracion_encuesta(user.id, valoracion)
+        await query.edit_message_text(
+            "¡Gracias! Última cosa (opcional):\n\n"
+            "Si tienes alguna *sugerencia o mejora*, escríbela aquí en este chat. "
+            "Si no, puedes saltarla.",
+            reply_markup=_encuesta_skip_sugerencia_markup(),
+            parse_mode="Markdown",
+        )
+        return
+
+    if data == "enc:skip":
+        cerrar_encuesta_sin_sugerencia(user.id)
+        await query.edit_message_text(
+            "¡Gracias por tu feedback! 🙏\n"
+            "Si en algún momento quieres volver, escribe /start."
+        )
+        return
+
+
 async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -1346,6 +1613,36 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if chat.type != "private":
         return
+
+    # Si el usuario está en mitad de la encuesta esperando una sugerencia
+    # y manda un mensaje de texto, lo guardamos como sugerencia y avisamos
+    # al admin. Las fotos/documentos siguen el flujo normal de comprobantes.
+    if message.text:
+        encuesta = get_encuesta(user.id)
+        if encuesta and encuesta.get("awaiting_sugerencia"):
+            sugerencia = (message.text or "").strip()
+            if sugerencia:
+                guardar_sugerencia_encuesta(user.id, sugerencia[:1000])
+                await message.reply_text(
+                    "¡Gracias por tu feedback! 🙏\n"
+                    "Si en algún momento quieres volver, escribe /start."
+                )
+                for admin_id in ADMIN_IDS:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=admin_id,
+                            text=(
+                                "📝 Sugerencia de encuesta\n\n"
+                                f"User ID: {user.id}\n"
+                                f"Nombre: {user.full_name}\n"
+                                f"Razón: {RAZONES_ENCUESTA.get(encuesta.get('razon') or '', encuesta.get('razon'))}\n"
+                                f"Valoración: {encuesta.get('valoracion')}/5\n"
+                                f"Sugerencia: {sugerencia[:1000]}"
+                            ),
+                        )
+                    except Exception as e:
+                        logger.error("Error reenviando sugerencia al admin %s: %s", admin_id, e)
+                return
 
     pending = get_pending_payment(user.id)
 
@@ -1848,6 +2145,113 @@ async def trials_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text((cabecera + "\n".join(lineas))[:4000])
 
 
+async def encuestas_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra el resumen de respuestas de la encuesta de satisfacción."""
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT e.telegram_user_id, e.plan, e.sent_at, e.razon, e.valoracion,
+                       e.sugerencia, e.responded_at, u.full_name, u.username
+                FROM encuestas e
+                LEFT JOIN users u ON u.telegram_user_id = e.telegram_user_id
+                ORDER BY e.sent_at DESC
+                """
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("Aún no se ha enviado ninguna encuesta.")
+        return
+
+    enviadas    = len(rows)
+    respondidas = sum(1 for r in rows if r["responded_at"])
+    rechazadas  = sum(1 for r in rows if r["razon"] == "rechazada")
+    sin_responder = enviadas - respondidas
+
+    razones = {}
+    valoraciones = []
+    for r in rows:
+        if r["razon"] and r["razon"] != "rechazada":
+            razones[r["razon"]] = razones.get(r["razon"], 0) + 1
+        if r["valoracion"] is not None:
+            valoraciones.append(r["valoracion"])
+
+    media = (sum(valoraciones) / len(valoraciones)) if valoraciones else None
+
+    lineas = [
+        f"📊 Encuestas — resumen\n",
+        f"Enviadas: {enviadas}",
+        f"Respondidas: {respondidas}",
+        f"Rechazaron: {rechazadas}",
+        f"Sin responder: {sin_responder}",
+    ]
+    if media is not None:
+        lineas.append(f"Valoración media: {media:.1f}/5 ({len(valoraciones)} respuestas)")
+    if razones:
+        lineas.append("\nMotivos:")
+        for key, count in sorted(razones.items(), key=lambda x: -x[1]):
+            etiqueta = RAZONES_ENCUESTA.get(key, key)
+            lineas.append(f"  • {etiqueta}: {count}")
+
+    sugerencias = [r for r in rows if r["sugerencia"]]
+    if sugerencias:
+        lineas.append("\n💬 Sugerencias:")
+        for r in sugerencias[-10:]:
+            nombre = r["full_name"] or f"User {r['telegram_user_id']}"
+            lineas.append(f"  • {nombre}: {r['sugerencia'][:200]}")
+
+    await update.message.reply_text("\n".join(lineas)[:4000])
+
+
+async def encuesta_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Envía la encuesta ahora mismo a todos los usuarios caducados que aún
+    no la han recibido, ignorando el delay de 3 días. Útil para hacer una
+    primera ronda con los caducados históricos.
+    """
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT u.telegram_user_id, u.plan, u.full_name
+                FROM users u
+                LEFT JOIN encuestas e ON e.telegram_user_id = u.telegram_user_id
+                WHERE u.estado = 'caducado'
+                  AND e.telegram_user_id IS NULL
+                ORDER BY u.fecha_fin ASC
+                """
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("No hay caducados sin encuesta pendiente.")
+        return
+
+    enviadas = 0
+    for r in rows:
+        ok = await enviar_encuesta_inicial(
+            context,
+            int(r["telegram_user_id"]),
+            r["full_name"] or "",
+            r["plan"],
+        )
+        if ok:
+            enviadas += 1
+
+    await update.message.reply_text(
+        f"📨 Encuesta enviada a {enviadas}/{len(rows)} usuarios caducados."
+    )
+
+
 async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Extiende manualmente la suscripción de un usuario sin pasar por el flujo de pago.
@@ -2256,6 +2660,39 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                 record.get("telegram_user_id"), e,
             )
 
+    # ── Tercera pasada: enviar encuesta de satisfacción a usuarios
+    # que caducaron hace al menos ENCUESTA_DELAY_DAYS días y aún no
+    # la han recibido.
+    delay_days = 3
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT u.telegram_user_id, u.plan, u.full_name
+                FROM users u
+                LEFT JOIN encuestas e ON e.telegram_user_id = u.telegram_user_id
+                WHERE u.estado = 'caducado'
+                  AND u.fecha_fin <= %s
+                  AND e.telegram_user_id IS NULL
+                """,
+                (today - timedelta(days=delay_days),),
+            )
+            candidatos = cur.fetchall()
+
+    for c in candidatos:
+        try:
+            await enviar_encuesta_inicial(
+                context,
+                int(c["telegram_user_id"]),
+                c["full_name"] or "",
+                c["plan"],
+            )
+        except Exception as e:
+            logger.error(
+                "Error enviando encuesta a %s: %s",
+                c.get("telegram_user_id"), e,
+            )
+
 
 async def limpiar_pending_payments_antiguos(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -2313,12 +2750,15 @@ def main() -> None:
     app.add_handler(CommandHandler("pendientes",    pendientes))
     app.add_handler(CommandHandler("caducan",       caducan))
     app.add_handler(CommandHandler("trials",        trials_admin))
+    app.add_handler(CommandHandler("encuestas",     encuestas_admin))
+    app.add_handler(CommandHandler("encuesta_pendientes", encuesta_pendientes))
     app.add_handler(CommandHandler("activos",       activos))
     app.add_handler(CommandHandler("expulsar",      expulsar))
     app.add_handler(CommandHandler("reexpulsar",    reexpulsar))
     app.add_handler(CommandHandler("renovar",       renovar))
 
     app.add_handler(CallbackQueryHandler(admin_action_callback, pattern=r"^(approve:|reject:)"))
+    app.add_handler(CallbackQueryHandler(encuesta_callback, pattern=r"^enc:"))
     app.add_handler(CallbackQueryHandler(seleccionar_plan))
 
     app.add_handler(
