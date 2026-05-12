@@ -2310,6 +2310,16 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     registrar_acceso_pendiente(target_user_id, plan)
 
+    # Generamos el invite link aquí mismo para devolvérselo al admin,
+    # de forma que pueda compartirlo manualmente (WhatsApp, DM, etc.)
+    # si el bot no puede mandar mensaje al usuario directamente.
+    try:
+        enlaces = await generar_enlaces_acceso(context, plan)
+    except Exception as e:
+        logger.error("Error generando enlaces en /renovar para %s: %s", target_user_id, e)
+        enlaces = []
+
+    aviso_al_user_ok = True
     try:
         await context.bot.send_message(
             chat_id=target_user_id,
@@ -2323,12 +2333,89 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode="Markdown",
         )
     except Exception as e:
+        aviso_al_user_ok = False
         logger.error(f"Error avisando renovación a {target_user_id}: {e}")
 
-    await update.message.reply_text(
-        f"✅ Suscripción renovada: usuario {target_user_id} | {plan.upper()} | hasta {record['fecha_fin']}"
+    respuesta = (
+        f"✅ Suscripción renovada: usuario {target_user_id} | "
+        f"{plan.upper()} | hasta {record['fecha_fin']}"
     )
+    if not aviso_al_user_ok:
+        respuesta += "\n\n⚠️ No he podido mandarle DM (¿bot bloqueado?). Comparte tú el link:"
+    if enlaces:
+        respuesta += "\n\nEnlaces de acceso (1 uso, 1 hora):"
+        for titulo, link in enlaces:
+            respuesta += f"\n{titulo}: {link}"
+
+    await update.message.reply_text(respuesta)
     logger.info(f"Renovación manual: user {target_user_id} | plan {plan} | hasta {record['fecha_fin']}")
+
+
+async def link_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Genera un invite link nuevo (1 uso, 1h) para un usuario con sub activa.
+    Útil para reenviar el acceso por DM/WhatsApp si el original caducó o
+    el usuario perdió el botón.
+    Uso: /link user_id
+    """
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("Uso: /link user_id")
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El user_id no es válido.")
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT plan, estado, fecha_fin FROM users WHERE telegram_user_id = %s",
+                (target_user_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        await update.message.reply_text(
+            f"Usuario {target_user_id} no tiene suscripción registrada. "
+            "Usa /renovar user_id plan para darle acceso."
+        )
+        return
+
+    if row["estado"] != "activo":
+        await update.message.reply_text(
+            f"⚠️ Usuario {target_user_id} no está activo (estado={row['estado']}). "
+            "Usa /renovar user_id [plan] primero."
+        )
+        return
+
+    plan = row["plan"]
+    try:
+        enlaces = await generar_enlaces_acceso(context, plan)
+    except Exception as e:
+        logger.error("Error generando enlaces en /link para %s: %s", target_user_id, e)
+        await update.message.reply_text(f"Error generando enlaces: {e}")
+        return
+
+    if not enlaces:
+        await update.message.reply_text(
+            f"No hay canales asociados al plan '{plan}'. Comprueba la configuración."
+        )
+        return
+
+    respuesta = (
+        f"🔑 Enlaces para usuario {target_user_id} "
+        f"({plan.upper()}, hasta {row['fecha_fin']})\n"
+        "Cada enlace es de *1 uso* y dura *1 hora*:\n"
+    )
+    for titulo, link in enlaces:
+        respuesta += f"\n{titulo}: {link}"
+    await update.message.reply_text(respuesta, parse_mode="Markdown")
 
 
 async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2756,6 +2843,7 @@ def main() -> None:
     app.add_handler(CommandHandler("expulsar",      expulsar))
     app.add_handler(CommandHandler("reexpulsar",    reexpulsar))
     app.add_handler(CommandHandler("renovar",       renovar))
+    app.add_handler(CommandHandler("link",          link_admin))
 
     app.add_handler(CallbackQueryHandler(admin_action_callback, pattern=r"^(approve:|reject:)"))
     app.add_handler(CallbackQueryHandler(encuesta_callback, pattern=r"^enc:"))
