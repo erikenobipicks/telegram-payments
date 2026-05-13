@@ -473,6 +473,12 @@ def get_plan_channels(plan: str) -> list[tuple[str, int]]:
         return [("📊 PREPARTIDO", CANAL_PRE_ID)]
     if plan == "combo":
         return [("⚽ GOLES", CANAL_GOLES_ID), ("🚩 CORNERS", CANAL_CORNERS_ID)]
+    if plan == "total":
+        return [
+            ("⚽ GOLES", CANAL_GOLES_ID),
+            ("🚩 CORNERS", CANAL_CORNERS_ID),
+            ("📊 PREPARTIDO", CANAL_PRE_ID),
+        ]
     return []
 
 
@@ -840,6 +846,51 @@ def extend_subscription(user_id: int, username: str | None, full_name: str, plan
                 return cur.fetchone()
     except Exception as e:
         logger.error("Error en extend_subscription para %s: %s", user_id, e)
+        raise
+
+
+def set_subscription(
+    user_id: int,
+    username: str | None,
+    full_name: str,
+    plan: str,
+    days: int,
+):
+    """
+    Asigna una suscripción con fecha_fin = hoy + days, sobreescribiendo
+    cualquier suscripción existente. A diferencia de extend_subscription,
+    NO suma sobre la fecha actual — es una operación 'set', no 'extend'.
+    Pensado para /regalar (cortesía, gifts, fixes).
+    """
+    today = today_date()
+    new_expiry = today + timedelta(days=days)
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO users (
+                        telegram_user_id, username, full_name, plan,
+                        fecha_inicio, fecha_fin, estado, created_at, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, 'activo', NOW(), NOW())
+                    ON CONFLICT (telegram_user_id)
+                    DO UPDATE SET
+                        username     = EXCLUDED.username,
+                        full_name    = EXCLUDED.full_name,
+                        plan         = EXCLUDED.plan,
+                        fecha_inicio = EXCLUDED.fecha_inicio,
+                        fecha_fin    = EXCLUDED.fecha_fin,
+                        estado       = 'activo',
+                        updated_at   = NOW()
+                    RETURNING telegram_user_id, username, full_name, plan, fecha_inicio, fecha_fin, estado
+                    """,
+                    (user_id, username, full_name, plan, today, new_expiry),
+                )
+                return cur.fetchone()
+    except Exception as e:
+        logger.error("Error en set_subscription para %s: %s", user_id, e)
         raise
 
 
@@ -1814,8 +1865,8 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     plan = context.args[1].lower()
-    if plan not in ("goles", "corners", "combo", "pre"):
-        await update.message.reply_text("Plan no válido. Usa: goles, corners, pre o combo")
+    if plan not in ("goles", "corners", "combo", "pre", "total"):
+        await update.message.reply_text("Plan no válido. Usa: goles, corners, pre, combo o total")
         return
 
     pending = get_pending_payment(target_user_id)
@@ -2291,8 +2342,8 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     plan_anterior = existing["plan"] if existing else None
     plan          = plan_nuevo or plan_anterior
-    if plan not in ("goles", "corners", "combo", "pre"):
-        await update.message.reply_text("Plan no válido. Usa: goles, corners, pre o combo")
+    if plan not in ("goles", "corners", "combo", "pre", "total"):
+        await update.message.reply_text("Plan no válido. Usa: goles, corners, pre, combo o total")
         return
 
     username   = existing["username"] if existing else None
@@ -2418,6 +2469,114 @@ async def link_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(respuesta, parse_mode="Markdown")
 
 
+async def regalar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Regala una suscripción a un usuario con fecha de fin FIJA: hoy + días.
+    A diferencia de /renovar, sobreescribe la fecha existente (no la suma).
+    Pensado para cortesía, regalos o arreglar suscripciones desfasadas.
+
+    Uso: /regalar <user_id> <plan> <días>
+      Plan: goles | corners | pre | combo | total
+      Ejemplo: /regalar 6905572130 total 30
+    """
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Uso: /regalar <user_id> <plan> <días>\n"
+            "Plan: goles | corners | pre | combo | total\n"
+            "Ejemplo: /regalar 6905572130 total 30"
+        )
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El user_id no es válido.")
+        return
+
+    plan = context.args[1].lower()
+    if plan not in ("goles", "corners", "combo", "pre", "total"):
+        await update.message.reply_text(
+            "Plan no válido. Usa: goles, corners, pre, combo o total"
+        )
+        return
+
+    try:
+        days = int(context.args[2])
+    except ValueError:
+        await update.message.reply_text("Los días deben ser un número entero.")
+        return
+    if days <= 0 or days > 365:
+        await update.message.reply_text("Días debe estar entre 1 y 365.")
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT username, full_name, plan FROM users WHERE telegram_user_id = %s",
+                (target_user_id,),
+            )
+            existing = cur.fetchone()
+
+    plan_anterior = existing["plan"] if existing else None
+    username  = existing["username"] if existing else None
+    full_name = existing["full_name"] if existing else f"Usuario {target_user_id}"
+
+    try:
+        record = set_subscription(target_user_id, username, full_name, plan, days)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error al asignar la suscripción: {e}")
+        return
+
+    # Si el plan anterior incluía canales que ya no están, expulsar
+    await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
+
+    registrar_acceso_pendiente(target_user_id, plan)
+
+    try:
+        enlaces = await generar_enlaces_acceso(context, plan)
+    except Exception as e:
+        logger.error("Error generando enlaces en /regalar para %s: %s", target_user_id, e)
+        enlaces = []
+
+    dm_ok = True
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "🎁 *Acceso de cortesía*\n\n"
+                f"Plan: *{plan.upper()}*\n"
+                f"Válido hasta: {record['fecha_fin']}\n\n"
+                "Pulsa el botón cuando quieras entrar al canal."
+            ),
+            reply_markup=acceso_listo_markup(),
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        dm_ok = False
+        logger.error(f"Error notificando regalo a {target_user_id}: {e}")
+
+    respuesta = (
+        f"🎁 Regalo activado: usuario {target_user_id} | {plan.upper()} | "
+        f"{days} días | hasta {record['fecha_fin']}"
+    )
+    if not dm_ok:
+        respuesta += "\n\n⚠️ No he podido mandarle DM. Comparte tú el link:"
+    if enlaces:
+        respuesta += "\n\nEnlaces de acceso (1 uso, 1 hora):"
+        for titulo, link in enlaces:
+            respuesta += f"\n{titulo}: {link}"
+
+    await update.message.reply_text(respuesta)
+    logger.info(
+        "Regalo: user %s | plan %s | %s días | hasta %s",
+        target_user_id, plan, days, record["fecha_fin"],
+    )
+
+
 async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _check_admin(update):
         await update.message.reply_text("No tienes permisos.")
@@ -2525,6 +2684,15 @@ def _instrucciones_renovacion(plan: str) -> str:
     que se incluye en todos los avisos de expiración.
     """
     plan = canonical_plan(plan)
+
+    # El plan TOTAL (GOLES + CORNERS + PRE) es siempre asignación manual
+    # del admin, no tiene precio público y no se compra por menu.
+    if plan == "total":
+        return (
+            "\n\nEste paquete completo se asigna manualmente. "
+            "Habla con @erikenobi si quieres renovarlo."
+        )
+
     precios  = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre": PRECIO_PRE}
     stripes  = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO, "pre": STRIPE_PRE}
 
@@ -2843,6 +3011,7 @@ def main() -> None:
     app.add_handler(CommandHandler("expulsar",      expulsar))
     app.add_handler(CommandHandler("reexpulsar",    reexpulsar))
     app.add_handler(CommandHandler("renovar",       renovar))
+    app.add_handler(CommandHandler("regalar",       regalar))
     app.add_handler(CommandHandler("link",          link_admin))
 
     app.add_handler(CallbackQueryHandler(admin_action_callback, pattern=r"^(approve:|reject:)"))
