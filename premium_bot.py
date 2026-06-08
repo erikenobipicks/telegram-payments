@@ -227,6 +227,37 @@ def init_db():
                 );
                 """
             )
+            # Registro de auditoría persistente: a diferencia del log en
+            # fichero (efímero, se pierde en cada redeploy), esta tabla guarda
+            # de forma permanente los eventos financieros y de acceso para
+            # poder reconstruir el historial de cada usuario (soporte, disputas).
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id             BIGSERIAL PRIMARY KEY,
+                    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    event          TEXT NOT NULL,
+                    actor_id       BIGINT,
+                    actor_tipo     TEXT NOT NULL DEFAULT 'sistema',
+                    target_user_id BIGINT,
+                    plan           TEXT,
+                    fecha_fin      DATE,
+                    detalle        TEXT
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_audit_target
+                ON audit_log (target_user_id, created_at DESC);
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_audit_event
+                ON audit_log (event, created_at DESC);
+                """
+            )
     logger.info("Base de datos inicializada.")
 
 
@@ -694,6 +725,43 @@ def restore_pending_payment(pending) -> None:
         logger.error(
             "Error restaurando pending_payment %s: %s",
             pending.get("telegram_user_id"), e,
+        )
+
+
+# ==============================
+# DB — AUDITORÍA
+# ==============================
+
+def registrar_evento(
+    event: str,
+    target_user_id: int | None = None,
+    actor_id: int | None = None,
+    actor_tipo: str = "sistema",
+    plan: str | None = None,
+    fecha_fin=None,
+    detalle: str | None = None,
+) -> None:
+    """
+    Inserta un evento en audit_log. Best-effort: nunca lanza, para no romper
+    el flujo principal si la auditoría falla. Eventos típicos: 'aprobacion',
+    'rechazo', 'renovacion', 'regalo', 'trial', 'caducidad',
+    'expulsion_manual', 'acceso_entregado'.
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO audit_log
+                        (event, actor_id, actor_tipo, target_user_id, plan, fecha_fin, detalle)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (event, actor_id, actor_tipo, target_user_id, plan, fecha_fin, detalle),
+                )
+    except Exception as e:
+        logger.error(
+            "Error registrando evento de auditoría '%s' (target=%s): %s",
+            event, target_user_id, e,
         )
 
 
@@ -1506,6 +1574,10 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         registrar_acceso_pendiente(user.id, plan_real)
         delete_pending_payment(user.id)
+        registrar_evento(
+            "trial", target_user_id=user.id, actor_id=user.id,
+            actor_tipo="user", plan=plan_real, fecha_fin=record["fecha_fin"],
+        )
 
         username_admin = f"@{user.username}" if user.username else "(sin username)"
         texto_admin = (
@@ -1784,6 +1856,11 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
         for (_, chat_id), (_, link) in zip(canales, enlaces)
     ]
     guardar_enlaces_generados(user.id, enlaces_con_chat)
+    registrar_evento(
+        "acceso_entregado", target_user_id=user.id, actor_id=user.id,
+        actor_tipo="user", plan=plan,
+        detalle=f"generacion={(acceso.get('generaciones') or 0) + 1}",
+    )
 
     texto = (
         "✅ *Acceso activado*\n\n"
@@ -1954,6 +2031,11 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await _expulsar_canales_obsoletos(context, user_id_int, plan_anterior, plan)
 
             registrar_acceso_pendiente(user_id_int, plan)
+            registrar_evento(
+                "aprobacion", target_user_id=user_id_int, actor_id=admin.id,
+                actor_tipo="admin", plan=plan, fecha_fin=record["fecha_fin"],
+                detalle=f"plan_anterior={plan_anterior}" if plan_anterior else None,
+            )
 
             try:
                 await context.bot.send_message(
@@ -1997,6 +2079,10 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 logger.error(f"Error avisando rechazo a {user_id_int}: {e}")
 
             delete_pending_payment(user_id_int)
+            registrar_evento(
+                "rechazo", target_user_id=user_id_int, actor_id=admin.id,
+                actor_tipo="admin",
+            )
             await query.edit_message_text(f"❌ Usuario {user_id_int} rechazado.")
             logger.info(f"Pago rechazado: user {user_id_int}")
             return
@@ -2071,6 +2157,12 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
 
     registrar_acceso_pendiente(target_user_id, plan)
+    registrar_evento(
+        "aprobacion", target_user_id=target_user_id,
+        actor_id=update.effective_user.id, actor_tipo="admin",
+        plan=plan, fecha_fin=record["fecha_fin"],
+        detalle="via /aprobar",
+    )
 
     try:
         await context.bot.send_message(
@@ -2116,6 +2208,11 @@ async def rechazar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Error avisando rechazo a {target_user_id}: {e}")
 
     delete_pending_payment(target_user_id)
+    registrar_evento(
+        "rechazo", target_user_id=target_user_id,
+        actor_id=update.effective_user.id, actor_tipo="admin",
+        detalle="via /rechazar",
+    )
     await update.message.reply_text(f"Usuario {target_user_id} rechazado.")
 
 
@@ -2156,6 +2253,117 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Fin: {record['fecha_fin']}\n"
         f"Estado: {record['estado']}"
     )
+
+
+# Emojis por tipo de evento para que el historial se lea de un vistazo.
+_EVENT_EMOJI = {
+    "aprobacion":       "✅",
+    "rechazo":          "❌",
+    "renovacion":       "🔁",
+    "regalo":           "🎁",
+    "trial":            "🆓",
+    "caducidad":        "⌛",
+    "expulsion_manual": "🚷",
+    "acceso_entregado": "🔑",
+}
+
+
+def _formatear_evento(row: dict, incluir_target: bool = False) -> str:
+    emoji = _EVENT_EMOJI.get(row["event"], "•")
+    cuando = row["created_at"]
+    cuando_str = cuando.strftime("%Y-%m-%d %H:%M") if hasattr(cuando, "strftime") else str(cuando)[:16]
+    partes = [f"{emoji} {cuando_str} | {row['event']}"]
+    if incluir_target and row.get("target_user_id"):
+        partes.append(f"u={row['target_user_id']}")
+    if row.get("plan"):
+        partes.append(str(row["plan"]))
+    if row.get("fecha_fin"):
+        partes.append(f"→ {row['fecha_fin']}")
+    if row.get("actor_tipo") and row["actor_tipo"] != "sistema":
+        partes.append(f"por {row['actor_tipo']}")
+    if row.get("detalle"):
+        partes.append(f"({row['detalle']})")
+    return " | ".join(partes)
+
+
+async def historial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra el historial de auditoría de un usuario. Uso: /historial user_id"""
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("Uso: /historial user_id")
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El user_id no es válido.")
+        return
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT created_at, event, actor_id, actor_tipo, target_user_id,
+                       plan, fecha_fin, detalle
+                FROM audit_log
+                WHERE target_user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 50
+                """,
+                (target_user_id,),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text(
+            f"No hay eventos de auditoría para el usuario {target_user_id}."
+        )
+        return
+
+    lineas = [f"🧾 Historial de {target_user_id} (últimos {len(rows)}):\n"]
+    for row in rows:
+        lineas.append(_formatear_evento(row))
+    await update.message.reply_text("\n".join(lineas)[:4000])
+
+
+async def auditoria(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra los últimos eventos de auditoría de todos los usuarios."""
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    limite = 30
+    if context.args:
+        try:
+            limite = max(1, min(100, int(context.args[0])))
+        except ValueError:
+            pass
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT created_at, event, actor_id, actor_tipo, target_user_id,
+                       plan, fecha_fin, detalle
+                FROM audit_log
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (limite,),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        await update.message.reply_text("No hay eventos de auditoría registrados.")
+        return
+
+    lineas = [f"🧾 Auditoría — últimos {len(rows)} eventos:\n"]
+    for row in rows:
+        lineas.append(_formatear_evento(row, incluir_target=True))
+    await update.message.reply_text("\n".join(lineas)[:4000])
 
 
 async def debug_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2535,6 +2743,11 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
 
     registrar_acceso_pendiente(target_user_id, plan)
+    registrar_evento(
+        "renovacion", target_user_id=target_user_id,
+        actor_id=update.effective_user.id, actor_tipo="admin",
+        plan=plan, fecha_fin=record["fecha_fin"], detalle="via /renovar",
+    )
 
     # Generamos el invite link aquí mismo para devolvérselo al admin,
     # de forma que pueda compartirlo manualmente (WhatsApp, DM, etc.)
@@ -2710,6 +2923,11 @@ async def regalar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
 
     registrar_acceso_pendiente(target_user_id, plan)
+    registrar_evento(
+        "regalo", target_user_id=target_user_id,
+        actor_id=update.effective_user.id, actor_tipo="admin",
+        plan=plan, fecha_fin=record["fecha_fin"], detalle=f"{days} días",
+    )
 
     try:
         enlaces = await generar_enlaces_acceso(context, plan)
@@ -2788,6 +3006,12 @@ async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "UPDATE users SET estado = 'caducado', updated_at = NOW() WHERE telegram_user_id = %s",
                 (target_user_id,),
             )
+
+    registrar_evento(
+        "expulsion_manual", target_user_id=target_user_id,
+        actor_id=update.effective_user.id, actor_tipo="admin",
+        plan=record["plan"], detalle=f"ban_ok={ok}",
+    )
 
     if ok:
         await update.message.reply_text(
@@ -3041,6 +3265,11 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     "Suscripción caducada y usuario expulsado: %s (trial=%s, ban_ok=%s)",
                     user_id, es_trial, expulsado_ok,
                 )
+                registrar_evento(
+                    "caducidad", target_user_id=int(user_id), actor_tipo="sistema",
+                    plan=record["plan"], fecha_fin=end_date,
+                    detalle=f"trial={es_trial} ban_ok={expulsado_ok}",
+                )
 
                 # Si la expulsión falló, avisar al admin (la job reintentará
                 # automáticamente cada ciclo en la segunda pasada).
@@ -3175,6 +3404,8 @@ def main() -> None:
     app.add_handler(CommandHandler("aprobar",       aprobar))
     app.add_handler(CommandHandler("rechazar",      rechazar))
     app.add_handler(CommandHandler("estado",        estado))
+    app.add_handler(CommandHandler("historial",     historial))
+    app.add_handler(CommandHandler("auditoria",     auditoria))
     app.add_handler(CommandHandler("debugpremium",  debug_premium))
     app.add_handler(CommandHandler("listar",        listar))
     app.add_handler(CommandHandler("pendientes",    pendientes))
