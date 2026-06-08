@@ -23,6 +23,49 @@ from telegram.ext import (
     filters,
 )
 
+from config import (
+    ADMIN_IDS,
+    BIZUM,
+    CANAL_CORNERS_ID,
+    CANAL_GOLES_ID,
+    CANAL_PRE_ID,
+    CHECK_EXPIRATIONS_EVERY_SECONDS,
+    DATABASE_URL,
+    DEPLOYMENT_COMMIT,
+    INVITE_EXPIRY_HOURS,
+    LINK_FREE,
+    MAX_GENERACIONES_ACCESO,
+    PAYPAL_LINK,
+    PICKS_DATABASE_URL,
+    PLAN_DAYS,
+    PRECIO_COMBO,
+    PRECIO_CORNERS,
+    PRECIO_GOLES,
+    PRECIO_PRE,
+    RATE_LIMITS,
+    REEXPULSION_RETRY_DAYS,
+    REFERIDO_MULTIPLICADOR,
+    REFERIDOR_DIAS,
+    REVOLUT_LINK,
+    STRIPE_COMBO,
+    STRIPE_CORNERS,
+    STRIPE_GOLES,
+    STRIPE_PRE,
+    TIMEZONE,
+    TOKEN,
+    TRIAL_DAYS,
+    _MESES_ES,
+)
+from keyboards import (
+    _confirmar_borrado_markup,
+    _privacidad_markup,
+    acceso_listo_markup,
+    admin_approval_markup,
+    menu_markup,
+    pago_markup,
+    volver_markup,
+)
+
 # ==============================
 # LOGGING
 # ==============================
@@ -54,97 +97,22 @@ logger = logging.getLogger(__name__)
 
 
 # ==============================
-# CONFIG
+# ESTADO EN MEMORIA (las constantes están en config.py)
 # ==============================
-
-TOKEN        = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-# DB de solo lectura del bot de picks (para estadísticas reales)
-PICKS_DATABASE_URL = os.getenv("PICKS_DATABASE_URL")
-
-ADMIN_IDS = [9330181]
-
-CANAL_CORNERS_ID = -1003895151594
-CANAL_GOLES_ID   = -1003818905455
-CANAL_PRE_ID     = -1003837149453   # Over 2.5 FT prepartido — análisis manual
-
-LINK_FREE = "https://t.me/+WhIkP2PstS1kMDVk"
-
-PRECIO_GOLES   = "20€"
-PRECIO_CORNERS = "20€"
-PRECIO_COMBO   = "30€"
-PRECIO_PRE     = "20€"
-
-BIZUM        = "+34660426660"
-PAYPAL_LINK  = "https://paypal.me/erikenobi"
-REVOLUT_LINK = "https://revolut.me/ericblasco9"
-
-STRIPE_GOLES   = "https://buy.stripe.com/aFa8wObuQ9MbdgA00x08g01"
-STRIPE_CORNERS = "https://buy.stripe.com/bJe3cugPaf6vdgA5kR08g02"
-STRIPE_COMBO   = "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
-STRIPE_PRE     = "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
-
-PLAN_DAYS    = 30
-TRIAL_DAYS   = 3
-INVITE_EXPIRY_HOURS = 1
-
-# Referidos: el referidor gana REFERIDOR_DIAS gratis y el recomendado recibe
-# 2x1 (REFERIDO_MULTIPLICADOR × los días normales) en su primer pago.
-REFERIDOR_DIAS = 30
-REFERIDO_MULTIPLICADOR = 2
 
 # Username del bot (sin @), para construir los enlaces de referido. Se rellena
 # al arrancar (post_init) con get_me(); también puede fijarse por entorno.
+# Vive aquí (no en config) porque se reasigna en _post_init.
 BOT_USERNAME = os.getenv("BOT_USERNAME")
-
-# Cada hora: reduce a ≤1h la ventana de acceso residual de un usuario ya
-# caducado (antes 12h). La expulsión es idempotente y, gracias al flag
-# acceso_revocado, no se re-banean usuarios ya expulsados con éxito.
-CHECK_EXPIRATIONS_EVERY_SECONDS = 3600  # 1h
-# Ventana del reintento automático de expulsión: solo se reintenta con
-# caducados recientes (los fallos antiguos se fuerzan a mano con /reexpulsar).
-REEXPULSION_RETRY_DAYS = 7
-
-# Máximo de enlaces de acceso que un usuario puede auto-generar por periodo
-# de suscripción. Limita el reparto de enlaces a terceros. El contador se
-# reinicia con cada aprobación/renovación/regalo (registrar_acceso_pendiente).
-MAX_GENERACIONES_ACCESO = 3
-
-TIMEZONE = "Europe/Madrid"
-
-DEPLOYMENT_COMMIT = (
-    os.getenv("RAILWAY_GIT_COMMIT_SHA")
-    or os.getenv("RAILWAY_GIT_COMMIT_MESSAGE")
-    or os.getenv("RAILWAY_DEPLOYMENT_ID")
-    or "local"
-)
 
 # Avisos de expiración ya enviados en este proceso (evita duplicados entre
 # las dos ejecuciones diarias del job). Se pierde en reinicio, lo cual es
 # aceptable: en el peor caso se envía el aviso dos veces tras un restart.
 _avisos_enviados: set[tuple[int, str]] = set()
 
-# ── Rate limiting en memoria ────────────────────────────────────────────────
-# Bot de proceso único (polling), así que un limitador en memoria basta.
-# Mapea (user_id, acción) -> timestamps monotónicos recientes; se purga al
-# vuelo. Límite por acción: (máx_llamadas, ventana_segundos).
+# Rate limiting en memoria: (user_id, acción) -> timestamps monotónicos
+# recientes; se purga al vuelo. Los límites están en config.RATE_LIMITS.
 _rate_buckets: dict[tuple[int, str], list[float]] = {}
-
-RATE_LIMITS: dict[str, tuple[int, int]] = {
-    "start":       (5, 30),    # comando /start
-    "menu":        (20, 20),   # navegación de botones (callbacks)
-    "trial":       (3, 30),    # activación de prueba gratuita
-    "acceso":      (2, 20),    # generación de enlaces (llama a la API Telegram)
-    "comprobante": (4, 60),    # reenvío de comprobantes al admin
-}
-
-# Meses en español para formateo de stats
-_MESES_ES = {
-    "01": "Ene", "02": "Feb", "03": "Mar", "04": "Abr",
-    "05": "May", "06": "Jun", "07": "Jul", "08": "Ago",
-    "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dic",
-}
 
 
 # ==============================
@@ -1491,82 +1459,6 @@ async def _expulsar_canales_obsoletos(
             )
 
 
-# ==============================
-# MARKUPS
-# ==============================
-
-def menu_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("ℹ️ Cómo funciona", callback_data="info"),
-            InlineKeyboardButton("📊 Estadísticas",  callback_data="stats"),
-        ],
-        [InlineKeyboardButton("📋 Guía de pago",     callback_data="guia")],
-        [InlineKeyboardButton("🆓 Canal FREE",        callback_data="free")],
-        [
-            InlineKeyboardButton("⚽ GOLES — 20€",   callback_data="goles"),
-            InlineKeyboardButton("🚩 CORNERS — 20€", callback_data="corners"),
-        ],
-        [InlineKeyboardButton("🔥 GOLES + CORNERS — 30€", callback_data="combo")],
-        [InlineKeyboardButton("📊 PREPARTIDO — 20€", callback_data="pre")],
-        [InlineKeyboardButton("🎁 Invitar amigos (gana 1 mes)", callback_data="referido")],
-        [
-            InlineKeyboardButton("🔒 Privacidad", callback_data="privacidad"),
-            InlineKeyboardButton("💬 Contacto",   url="https://t.me/erikenobi"),
-        ],
-    ])
-
-
-def volver_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")]]
-    )
-
-
-def pago_markup(plan: str) -> InlineKeyboardMarkup:
-    precios = {"goles": "20", "corners": "20", "combo": "30", "pre": "20"}
-    stripes = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO, "pre": STRIPE_PRE}
-    importe = precios.get(plan, "")
-
-    stripe_url = stripes.get(plan, "")
-    keyboard = [
-        [InlineKeyboardButton(
-            f"🎁 Probar gratis {TRIAL_DAYS} días",
-            callback_data=f"trial:{plan}",
-        )],
-    ]
-    if stripe_url:
-        keyboard.append([InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=stripe_url)])
-    keyboard += [
-        [InlineKeyboardButton("🅿️ Pagar con PayPal",           url=f"{PAYPAL_LINK}/{importe}")],
-        [InlineKeyboardButton("📲 Bizum",   callback_data=f"bizum:{plan}"),
-         InlineKeyboardButton("🟣 Revolut", callback_data=f"revolut:{plan}")],
-        [InlineKeyboardButton("📋 ¿Cómo activo el acceso?", callback_data="guia")],
-        [InlineKeyboardButton("⬅️ Volver al menú",          callback_data="menu")],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-def admin_approval_markup(user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Aprobar GOLES",   callback_data=f"approve:goles:{user_id}"),
-            InlineKeyboardButton("✅ Aprobar CORNERS", callback_data=f"approve:corners:{user_id}"),
-        ],
-        [
-            InlineKeyboardButton("✅ Aprobar PRE",   callback_data=f"approve:pre:{user_id}"),
-            InlineKeyboardButton("✅ Aprobar COMBO", callback_data=f"approve:combo:{user_id}"),
-        ],
-        [InlineKeyboardButton("❌ Rechazar", callback_data=f"reject:{user_id}")],
-    ])
-
-
-def acceso_listo_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔑 Obtener mi acceso", callback_data="obtener_acceso")]]
-    )
-
-
 def registrar_visitante(user_id: int, username: str | None, full_name: str) -> bool:
     """
     Registra al usuario en bot_visitors si es la primera vez.
@@ -1862,20 +1754,6 @@ def _texto_privacidad() -> str:
         "cancela tu suscripción y tu acceso a los canales).\n\n"
         "*Contacto:* @erikenobi"
     )
-
-
-def _privacidad_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗑 Borrar mis datos", callback_data="borrar:pedir")],
-        [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
-    ])
-
-
-def _confirmar_borrado_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Sí, borrar todo", callback_data="borrar:confirm")],
-        [InlineKeyboardButton("❌ No, cancelar", callback_data="menu")],
-    ])
 
 
 async def privacidad_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
