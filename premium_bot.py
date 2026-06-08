@@ -4,6 +4,7 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -110,6 +111,20 @@ DEPLOYMENT_COMMIT = (
 # las dos ejecuciones diarias del job). Se pierde en reinicio, lo cual es
 # aceptable: en el peor caso se envía el aviso dos veces tras un restart.
 _avisos_enviados: set[tuple[int, str]] = set()
+
+# ── Rate limiting en memoria ────────────────────────────────────────────────
+# Bot de proceso único (polling), así que un limitador en memoria basta.
+# Mapea (user_id, acción) -> timestamps monotónicos recientes; se purga al
+# vuelo. Límite por acción: (máx_llamadas, ventana_segundos).
+_rate_buckets: dict[tuple[int, str], list[float]] = {}
+
+RATE_LIMITS: dict[str, tuple[int, int]] = {
+    "start":       (5, 30),    # comando /start
+    "menu":        (20, 20),   # navegación de botones (callbacks)
+    "trial":       (3, 30),    # activación de prueba gratuita
+    "acceso":      (2, 20),    # generación de enlaces (llama a la API Telegram)
+    "comprobante": (4, 60),    # reenvío de comprobantes al admin
+}
 
 # Meses en español para formateo de stats
 _MESES_ES = {
@@ -514,6 +529,51 @@ def now_utc():
 
 def parse_date(date_str: str):
     return datetime.strptime(str(date_str), "%Y-%m-%d").date()
+
+
+def rate_limited(user_id: int, accion: str) -> bool:
+    """
+    Devuelve True si la acción debe BLOQUEARSE por exceder su límite (ventana
+    deslizante en memoria). Los admins nunca se limitan. Acciones sin límite
+    configurado nunca bloquean.
+    """
+    if user_id in ADMIN_IDS:
+        return False
+    max_calls, per_seconds = RATE_LIMITS.get(accion, (0, 0))
+    if max_calls <= 0:
+        return False
+
+    now = monotonic()
+    cutoff = now - per_seconds
+    bucket = _rate_buckets.get((user_id, accion))
+    if bucket is None:
+        bucket = []
+        _rate_buckets[(user_id, accion)] = bucket
+
+    # Purga los timestamps fuera de la ventana (el bucket está ordenado).
+    drop = 0
+    for ts in bucket:
+        if ts >= cutoff:
+            break
+        drop += 1
+    if drop:
+        del bucket[:drop]
+
+    if len(bucket) >= max_calls:
+        return True
+    bucket.append(now)
+    return False
+
+
+def _limpiar_rate_buckets() -> None:
+    """Elimina buckets vacíos o totalmente expirados para acotar la memoria."""
+    now = monotonic()
+    for key in list(_rate_buckets.keys()):
+        _, accion = key
+        _, per_seconds = RATE_LIMITS.get(accion, (0, 0))
+        bucket = _rate_buckets.get(key)
+        if not bucket or bucket[-1] < now - per_seconds:
+            _rate_buckets.pop(key, None)
 
 
 # Algunos usuarios antiguos están registrados con nombres de plan que ya
@@ -1312,6 +1372,11 @@ def registrar_visitante(user_id: int, username: str | None, full_name: str) -> b
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
 
+    # Anti-spam: si el usuario martillea /start, ignoramos en silencio para
+    # no amplificar (no registramos visitante de nuevo ni reenviamos al admin).
+    if user and rate_limited(user.id, "start"):
+        return
+
     if user:
         if registrar_visitante(user.id, user.username, user.full_name):
             username_admin = f"@{user.username}" if user.username else "(sin username)"
@@ -1371,10 +1436,16 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    user = query.from_user
+
+    # Anti-spam de botones: si pulsa demasiado rápido, avisamos con un toast
+    # (sin enviar mensaje nuevo) y no procesamos el callback.
+    if rate_limited(user.id, "menu"):
+        await query.answer("Vas muy rápido, espera un momento ⏳", show_alert=False)
+        return
     await query.answer()
 
     plan = query.data
-    user = query.from_user
 
     # Registrar en pendientes cuando el usuario elige un plan de pago
     if plan in ("goles", "corners", "combo", "pre"):
@@ -1602,6 +1673,13 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if plan_real not in ("goles", "corners", "combo", "pre"):
             await query.edit_message_text(
                 "Plan no válido para la prueba.",
+                reply_markup=volver_markup(),
+            )
+            return
+
+        if rate_limited(user.id, "trial"):
+            await query.edit_message_text(
+                "⏳ Vas muy rápido. Espera unos segundos e inténtalo de nuevo.",
                 reply_markup=volver_markup(),
             )
             return
@@ -1875,7 +1953,19 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
 
-    user   = query.from_user
+    user = query.from_user
+
+    # Anti-spam estricto: generar enlaces llama a la API de Telegram. Evita
+    # martilleo del botón "Generar nuevo enlace".
+    if rate_limited(user.id, "acceso"):
+        await query.edit_message_text(
+            "⏳ Vas muy rápido. Espera unos segundos antes de generar otro enlace.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔄 Generar nuevo enlace", callback_data="obtener_acceso")]]
+            ),
+        )
+        return
+
     acceso = get_acceso_pendiente(user.id)
 
     if not acceso:
@@ -2000,6 +2090,14 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not pending:
         await message.reply_text(
             "Antes de enviar el comprobante, usa /start y selecciona un plan."
+        )
+        return
+
+    # Anti-spam: limita el reenvío de comprobantes al admin para evitar que
+    # un usuario inunde el chat del admin con muchas capturas seguidas.
+    if rate_limited(user.id, "comprobante"):
+        await message.reply_text(
+            "He recibido tu mensaje. Espera la validación, por favor 🙏"
         )
         return
 
@@ -3373,6 +3471,9 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Error enviando encuesta a %s: %s",
                 c.get("telegram_user_id"), e,
             )
+
+    # Limpieza de buckets de rate limiting expirados (acota memoria).
+    _limpiar_rate_buckets()
 
 
 async def limpiar_pending_payments_antiguos(context: ContextTypes.DEFAULT_TYPE) -> None:
