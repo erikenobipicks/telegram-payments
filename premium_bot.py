@@ -2671,7 +2671,7 @@ async def reexpulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     cabecera = f"🔁 Reexpulsión: {ok_count}/{len(rows)} OK\n\n"
     await update.message.reply_text((cabecera + "\n".join(lineas))[:4000])
-    logger.info(f"Admin expulsó manualmente al usuario {target_user_id}")
+    logger.info("Reexpulsión manual: %d/%d usuarios expulsados OK", ok_count, len(rows))
 
 
 # ==============================
