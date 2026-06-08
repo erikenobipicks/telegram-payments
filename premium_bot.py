@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sys
@@ -84,6 +85,11 @@ PLAN_DAYS    = 30
 TRIAL_DAYS   = 3
 INVITE_EXPIRY_HOURS = 1
 CHECK_EXPIRATIONS_EVERY_SECONDS = 43200  # 12h
+
+# Máximo de enlaces de acceso que un usuario puede auto-generar por periodo
+# de suscripción. Limita el reparto de enlaces a terceros. El contador se
+# reinicia con cada aprobación/renovación/regalo (registrar_acceso_pendiente).
+MAX_GENERACIONES_ACCESO = 3
 
 TIMEZONE = "Europe/Madrid"
 
@@ -172,6 +178,20 @@ def init_db():
                     plan             TEXT NOT NULL,
                     approved_at      TIMESTAMP NOT NULL DEFAULT NOW()
                 );
+                """
+            )
+            # Columnas para limitar y auditar la auto-generación de enlaces
+            # (control de la fuga de acceso por reparto de enlaces de 1 uso).
+            cur.execute(
+                """
+                ALTER TABLE pending_access
+                    ADD COLUMN IF NOT EXISTS generaciones INTEGER NOT NULL DEFAULT 0;
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE pending_access
+                    ADD COLUMN IF NOT EXISTS ultimos_enlaces TEXT;
                 """
             )
             cur.execute(
@@ -501,6 +521,27 @@ async def generar_enlaces_acceso(context: ContextTypes.DEFAULT_TYPE, plan: str) 
     return enlaces
 
 
+async def _revocar_enlaces(context: ContextTypes.DEFAULT_TYPE, enlaces_json: str | None) -> None:
+    """
+    Revoca (best-effort) los enlaces de invitación emitidos en la generación
+    anterior, almacenados como JSON [[chat_id, link], ...]. Así solo el último
+    set de enlaces queda vivo y no se pueden acumular varios de 1 uso a la vez.
+    """
+    if not enlaces_json:
+        return
+    try:
+        enlaces = json.loads(enlaces_json)
+    except Exception:
+        return
+    for item in enlaces:
+        try:
+            chat_id, link = item[0], item[1]
+            await context.bot.revoke_chat_invite_link(chat_id, link)
+            logger.info("Enlace previo revocado en %s", chat_id)
+        except Exception as e:
+            logger.debug("No se pudo revocar enlace %s: %s", item, e)
+
+
 # ==============================
 # DB — PENDING ACCESS
 # ==============================
@@ -511,10 +552,14 @@ def registrar_acceso_pendiente(user_id: int, plan: str) -> None:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO pending_access (telegram_user_id, plan, approved_at)
-                    VALUES (%s, %s, NOW())
+                    INSERT INTO pending_access (telegram_user_id, plan, approved_at, generaciones, ultimos_enlaces)
+                    VALUES (%s, %s, NOW(), 0, NULL)
                     ON CONFLICT (telegram_user_id)
-                    DO UPDATE SET plan = EXCLUDED.plan, approved_at = NOW();
+                    DO UPDATE SET
+                        plan = EXCLUDED.plan,
+                        approved_at = NOW(),
+                        generaciones = 0,
+                        ultimos_enlaces = NULL;
                     """,
                     (user_id, plan),
                 )
@@ -527,10 +572,35 @@ def get_acceso_pendiente(user_id: int):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT telegram_user_id, plan FROM pending_access WHERE telegram_user_id = %s",
+                """
+                SELECT telegram_user_id, plan, generaciones, ultimos_enlaces
+                FROM pending_access WHERE telegram_user_id = %s
+                """,
                 (user_id,),
             )
             return cur.fetchone()
+
+
+def guardar_enlaces_generados(user_id: int, enlaces_con_chat: list) -> None:
+    """
+    Incrementa el contador de generaciones y guarda los enlaces emitidos
+    (con su chat_id) para poder revocarlos en la siguiente generación.
+    """
+    try:
+        payload = json.dumps(enlaces_con_chat)
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE pending_access
+                    SET generaciones    = generaciones + 1,
+                        ultimos_enlaces = %s
+                    WHERE telegram_user_id = %s
+                    """,
+                    (payload, user_id),
+                )
+    except Exception as e:
+        logger.error("Error guardando enlaces generados para %s: %s", user_id, e)
 
 
 def borrar_acceso_pendiente(user_id: int) -> None:
@@ -569,6 +639,62 @@ def delete_pending_payment(user_id: int) -> None:
                 "DELETE FROM pending_payments WHERE telegram_user_id = %s",
                 (user_id,),
             )
+
+
+def claim_pending_payment(user_id: int):
+    """
+    Borra y devuelve atómicamente el pago pendiente (DELETE ... RETURNING).
+    Garantiza idempotencia en la aprobación: solo la PRIMERA llamada obtiene
+    la fila; aprobaciones duplicadas (doble clic, varias capturas o carrera
+    entre procesos) reciben None y no vuelven a extender la suscripción.
+    Devuelve None si no había pago pendiente.
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM pending_payments
+                WHERE telegram_user_id = %s
+                RETURNING telegram_user_id, username, full_name, plan, created_at
+                """,
+                (user_id,),
+            )
+            return cur.fetchone()
+
+
+def restore_pending_payment(pending) -> None:
+    """
+    Reinserta un pago pendiente previamente reclamado con claim_pending_payment.
+    Se usa para revertir el 'claim' si la aprobación falla a media operación,
+    de modo que el admin pueda reintentarla.
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO pending_payments
+                        (telegram_user_id, username, full_name, plan, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (telegram_user_id) DO UPDATE SET
+                        username   = EXCLUDED.username,
+                        full_name  = EXCLUDED.full_name,
+                        plan       = EXCLUDED.plan,
+                        created_at = EXCLUDED.created_at
+                    """,
+                    (
+                        pending["telegram_user_id"],
+                        pending["username"],
+                        pending["full_name"],
+                        pending["plan"],
+                        pending["created_at"],
+                    ),
+                )
+    except Exception as e:
+        logger.error(
+            "Error restaurando pending_payment %s: %s",
+            pending.get("telegram_user_id"), e,
+        )
 
 
 # ==============================
@@ -1621,6 +1747,25 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
 
     plan = acceso["plan"]
 
+    # Límite de auto-generación: impide que un suscriptor genere enlaces de
+    # forma indefinida para repartirlos a terceros. Se reinicia con cada
+    # aprobación/renovación/regalo (registrar_acceso_pendiente).
+    if (acceso.get("generaciones") or 0) >= MAX_GENERACIONES_ACCESO:
+        await query.edit_message_text(
+            "⚠️ Ya has generado varios enlaces de acceso para esta suscripción.\n"
+            "Por seguridad no puedo crear más automáticamente.\n\n"
+            "Si necesitas otro, escríbeme: @erikenobi"
+        )
+        logger.warning(
+            "Usuario %s alcanzó el límite de generación de enlaces (%s)",
+            user.id, MAX_GENERACIONES_ACCESO,
+        )
+        return
+
+    # Revocar los enlaces emitidos antes (si los hubiera): solo el último set
+    # queda vivo, evitando acumular varios enlaces de 1 uso simultáneos.
+    await _revocar_enlaces(context, acceso.get("ultimos_enlaces"))
+
     try:
         enlaces = await generar_enlaces_acceso(context, plan)
     except Exception as e:
@@ -1629,6 +1774,16 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
             "⚠️ Ha habido un error generando tu enlace. Por favor, contáctame: @erikenobi"
         )
         return
+
+    # Persistir los enlaces (con su chat_id) y contar esta generación. El orden
+    # de `enlaces` coincide con el de get_plan_channels(plan), así que podemos
+    # emparejar cada link con su chat_id por posición.
+    canales = get_plan_channels(plan)
+    enlaces_con_chat = [
+        [chat_id, link]
+        for (_, chat_id), (_, link) in zip(canales, enlaces)
+    ]
+    guardar_enlaces_generados(user.id, enlaces_con_chat)
 
     texto = (
         "✅ *Acceso activado*\n\n"
@@ -1644,7 +1799,8 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
     )
 
     # No borramos pending_access: así el usuario puede regenerar el enlace
-    # si caduca antes de usarlo. Se limpia cuando la suscripción expira.
+    # si caduca antes de usarlo (hasta MAX_GENERACIONES_ACCESO veces).
+    # Se limpia cuando la suscripción expira.
     await query.edit_message_text(
         texto,
         parse_mode="Markdown",
@@ -1760,10 +1916,14 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 await query.edit_message_text("Plan no válido.")
                 return
 
-            pending = get_pending_payment(user_id_int)
+            # Reclamamos el pago de forma atómica: la primera aprobación se
+            # queda con la fila; cualquier clic posterior (o segundo mensaje
+            # con botones de otra captura) recibe None y no vuelve a extender.
+            pending = claim_pending_payment(user_id_int)
             if not pending:
                 await query.edit_message_text(
-                    f"⚠️ El usuario {user_id_int} ya no está en pendientes."
+                    f"⚠️ El usuario {user_id_int} ya no está en pendientes "
+                    "(¿ya aprobado o rechazado?)."
                 )
                 return
 
@@ -1777,18 +1937,23 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     row = cur.fetchone()
                     plan_anterior = row["plan"] if row else None
 
-            record = extend_subscription(
-                user_id=user_id_int,
-                username=pending["username"],
-                full_name=pending["full_name"],
-                plan=plan,
-            )
+            try:
+                record = extend_subscription(
+                    user_id=user_id_int,
+                    username=pending["username"],
+                    full_name=pending["full_name"],
+                    plan=plan,
+                )
+            except Exception:
+                # Si falla la extensión, devolvemos el pago a pendientes para
+                # que el admin pueda reintentar.
+                restore_pending_payment(pending)
+                raise
 
             # Si cambió de plan, expulsar de los canales que ya no le corresponden
             await _expulsar_canales_obsoletos(context, user_id_int, plan_anterior, plan)
 
             registrar_acceso_pendiente(user_id_int, plan)
-            delete_pending_payment(user_id_int)
 
             try:
                 await context.bot.send_message(
@@ -1869,9 +2034,13 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Plan no válido. Usa: goles, corners, pre, combo o total")
         return
 
-    pending = get_pending_payment(target_user_id)
+    # Reclamamos el pago de forma atómica (idempotencia): una segunda
+    # ejecución de /aprobar para el mismo usuario no vuelve a extender.
+    pending = claim_pending_payment(target_user_id)
     if not pending:
-        await update.message.reply_text("Ese usuario no está en pendientes.")
+        await update.message.reply_text(
+            "Ese usuario no está en pendientes (¿ya aprobado o rechazado?)."
+        )
         return
 
     # Plan actual en DB (para detectar cambio de plan)
@@ -1884,18 +2053,24 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             row = cur.fetchone()
             plan_anterior = row["plan"] if row else None
 
-    record = extend_subscription(
-        user_id=target_user_id,
-        username=pending["username"],
-        full_name=pending["full_name"],
-        plan=plan,
-    )
+    try:
+        record = extend_subscription(
+            user_id=target_user_id,
+            username=pending["username"],
+            full_name=pending["full_name"],
+            plan=plan,
+        )
+    except Exception as e:
+        restore_pending_payment(pending)
+        await update.message.reply_text(
+            f"⚠️ Error al aprobar (no se aplicó nada): {e}. Reinténtalo."
+        )
+        return
 
     # Si cambió de plan, expulsar de los canales que ya no le corresponden
     await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
 
     registrar_acceso_pendiente(target_user_id, plan)
-    delete_pending_payment(target_user_id)
 
     try:
         await context.bot.send_message(
@@ -3044,7 +3219,9 @@ def main() -> None:
         BIZUM,
         DEPLOYMENT_COMMIT,
     )
-    app.run_polling(drop_pending_updates=True)
+    # No descartamos los updates acumulados durante una caída/redeploy: así no
+    # se pierden comprobantes ni mensajes enviados mientras el bot estaba abajo.
+    app.run_polling(drop_pending_updates=False)
 
 
 if __name__ == "__main__":
