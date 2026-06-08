@@ -2129,7 +2129,6 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         _, plan_real = plan.split(":", 1)
         importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre": PRECIO_PRE}
         importe  = importes.get(plan_real, "consultar")
-        revolut_escaped = REVOLUT_LINK.replace(".", "\\.").replace("-", "\\-")
         await query.edit_message_text(
             f"🟣 *Pago por Revolut*\n\n"
             f"Plan: *{plan_real.upper()}*\n"
@@ -3250,7 +3249,7 @@ async def encuestas_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     media = (sum(valoraciones) / len(valoraciones)) if valoraciones else None
 
     lineas = [
-        f"📊 Encuestas — resumen\n",
+        "📊 Encuestas — resumen\n",
         f"Enviadas: {enviadas}",
         f"Respondidas: {respondidas}",
         f"Rechazaron: {rechazadas}",
