@@ -577,23 +577,29 @@ async def _revocar_enlaces(context: ContextTypes.DEFAULT_TYPE, enlaces_json: str
 # DB — PENDING ACCESS
 # ==============================
 
+_REGISTRAR_ACCESO_SQL = """
+    INSERT INTO pending_access (telegram_user_id, plan, approved_at, generaciones, ultimos_enlaces)
+    VALUES (%s, %s, NOW(), 0, NULL)
+    ON CONFLICT (telegram_user_id)
+    DO UPDATE SET
+        plan = EXCLUDED.plan,
+        approved_at = NOW(),
+        generaciones = 0,
+        ultimos_enlaces = NULL;
+"""
+
+
+def _registrar_acceso_cur(cur, user_id: int, plan: str) -> None:
+    """Versión por-cursor de registrar_acceso_pendiente, para participar en
+    una transacción mayor (mantiene el reset de generaciones/ultimos_enlaces)."""
+    cur.execute(_REGISTRAR_ACCESO_SQL, (user_id, plan))
+
+
 def registrar_acceso_pendiente(user_id: int, plan: str) -> None:
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO pending_access (telegram_user_id, plan, approved_at, generaciones, ultimos_enlaces)
-                    VALUES (%s, %s, NOW(), 0, NULL)
-                    ON CONFLICT (telegram_user_id)
-                    DO UPDATE SET
-                        plan = EXCLUDED.plan,
-                        approved_at = NOW(),
-                        generaciones = 0,
-                        ultimos_enlaces = NULL;
-                    """,
-                    (user_id, plan),
-                )
+                _registrar_acceso_cur(cur, user_id, plan)
     except Exception as e:
         logger.error("Error registrando acceso pendiente para %s: %s", user_id, e)
         raise
@@ -672,65 +678,50 @@ def delete_pending_payment(user_id: int) -> None:
             )
 
 
-def claim_pending_payment(user_id: int):
+def _claim_pending_cur(cur, user_id: int):
     """
-    Borra y devuelve atómicamente el pago pendiente (DELETE ... RETURNING).
-    Garantiza idempotencia en la aprobación: solo la PRIMERA llamada obtiene
-    la fila; aprobaciones duplicadas (doble clic, varias capturas o carrera
-    entre procesos) reciben None y no vuelven a extender la suscripción.
-    Devuelve None si no había pago pendiente.
+    Borra y devuelve el pago pendiente (DELETE ... RETURNING) sobre un cursor
+    existente. Garantiza idempotencia en la aprobación: solo la PRIMERA llamada
+    obtiene la fila; aprobaciones duplicadas (doble clic, varias capturas o
+    carrera entre procesos) reciben None. Al ejecutarse dentro de la misma
+    transacción que la extensión, si esta falla, el claim también se revierte.
     """
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                DELETE FROM pending_payments
-                WHERE telegram_user_id = %s
-                RETURNING telegram_user_id, username, full_name, plan, created_at
-                """,
-                (user_id,),
-            )
-            return cur.fetchone()
-
-
-def restore_pending_payment(pending) -> None:
-    """
-    Reinserta un pago pendiente previamente reclamado con claim_pending_payment.
-    Se usa para revertir el 'claim' si la aprobación falla a media operación,
-    de modo que el admin pueda reintentarla.
-    """
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO pending_payments
-                        (telegram_user_id, username, full_name, plan, created_at)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (telegram_user_id) DO UPDATE SET
-                        username   = EXCLUDED.username,
-                        full_name  = EXCLUDED.full_name,
-                        plan       = EXCLUDED.plan,
-                        created_at = EXCLUDED.created_at
-                    """,
-                    (
-                        pending["telegram_user_id"],
-                        pending["username"],
-                        pending["full_name"],
-                        pending["plan"],
-                        pending["created_at"],
-                    ),
-                )
-    except Exception as e:
-        logger.error(
-            "Error restaurando pending_payment %s: %s",
-            pending.get("telegram_user_id"), e,
-        )
+    cur.execute(
+        """
+        DELETE FROM pending_payments
+        WHERE telegram_user_id = %s
+        RETURNING telegram_user_id, username, full_name, plan, created_at
+        """,
+        (user_id,),
+    )
+    return cur.fetchone()
 
 
 # ==============================
 # DB — AUDITORÍA
 # ==============================
+
+def _registrar_evento_cur(
+    cur,
+    event: str,
+    target_user_id: int | None = None,
+    actor_id: int | None = None,
+    actor_tipo: str = "sistema",
+    plan: str | None = None,
+    fecha_fin=None,
+    detalle: str | None = None,
+) -> None:
+    """Inserta un evento en audit_log usando un cursor existente (para que la
+    auditoría forme parte de la misma transacción que la operación auditada)."""
+    cur.execute(
+        """
+        INSERT INTO audit_log
+            (event, actor_id, actor_tipo, target_user_id, plan, fecha_fin, detalle)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        (event, actor_id, actor_tipo, target_user_id, plan, fecha_fin, detalle),
+    )
+
 
 def registrar_evento(
     event: str,
@@ -742,21 +733,17 @@ def registrar_evento(
     detalle: str | None = None,
 ) -> None:
     """
-    Inserta un evento en audit_log. Best-effort: nunca lanza, para no romper
-    el flujo principal si la auditoría falla. Eventos típicos: 'aprobacion',
-    'rechazo', 'renovacion', 'regalo', 'trial', 'caducidad',
-    'expulsion_manual', 'acceso_entregado'.
+    Inserta un evento en audit_log en su propia transacción. Best-effort:
+    nunca lanza, para no romper el flujo principal si la auditoría falla.
+    Eventos típicos: 'aprobacion', 'rechazo', 'renovacion', 'regalo',
+    'trial', 'caducidad', 'expulsion_manual', 'acceso_entregado'.
     """
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO audit_log
-                        (event, actor_id, actor_tipo, target_user_id, plan, fecha_fin, detalle)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (event, actor_id, actor_tipo, target_user_id, plan, fecha_fin, detalle),
+                _registrar_evento_cur(
+                    cur, event, target_user_id=target_user_id, actor_id=actor_id,
+                    actor_tipo=actor_tipo, plan=plan, fecha_fin=fecha_fin, detalle=detalle,
                 )
     except Exception as e:
         logger.error(
@@ -785,8 +772,8 @@ def es_trial_actual(user_id: int, fecha_inicio, fecha_fin) -> bool:
     al periodo de prueba (no a una suscripción de pago).
 
     El trial fija fecha_inicio = used_at::date y fecha_fin = used_at + TRIAL_DAYS.
-    Cualquier pago posterior llama a extend_subscription, que reescribe
-    fecha_inicio al día del pago, así que la igualdad se rompe.
+    Cualquier pago/renovación posterior reescribe fecha_inicio al día de la
+    operación (vía _extend_user_cur), así que la igualdad se rompe.
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -996,96 +983,145 @@ def cerrar_encuesta_sin_sugerencia(user_id: int) -> None:
 # DB — USERS / SUBSCRIPTIONS
 # ==============================
 
-def extend_subscription(user_id: int, username: str | None, full_name: str, plan: str):
-    today = today_date()
-
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT fecha_fin FROM users WHERE telegram_user_id = %s",
-                    (user_id,),
-                )
-                existing = cur.fetchone()
-
-                if existing and existing["fecha_fin"]:
-                    old_expiry = existing["fecha_fin"]
-                    if isinstance(old_expiry, str):
-                        old_expiry = parse_date(old_expiry)
-                    base_date = old_expiry if old_expiry >= today else today
-                    new_expiry = base_date + timedelta(days=PLAN_DAYS)
-                else:
-                    new_expiry = today + timedelta(days=PLAN_DAYS)
-
-                cur.execute(
-                    """
-                    INSERT INTO users (
-                        telegram_user_id, username, full_name, plan,
-                        fecha_inicio, fecha_fin, estado, created_at, updated_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, 'activo', NOW(), NOW())
-                    ON CONFLICT (telegram_user_id)
-                    DO UPDATE SET
-                        username     = EXCLUDED.username,
-                        full_name    = EXCLUDED.full_name,
-                        plan         = EXCLUDED.plan,
-                        fecha_inicio = EXCLUDED.fecha_inicio,
-                        fecha_fin    = EXCLUDED.fecha_fin,
-                        estado       = 'activo',
-                        updated_at   = NOW()
-                    RETURNING telegram_user_id, username, full_name, plan, fecha_inicio, fecha_fin, estado
-                    """,
-                    (user_id, username, full_name, plan, today, new_expiry),
-                )
-                return cur.fetchone()
-    except Exception as e:
-        logger.error("Error en extend_subscription para %s: %s", user_id, e)
-        raise
+# SQL de upsert de la fila de users, compartido por todos los caminos
+# ('extend' y 'set'). Devuelve la fila resultante.
+_UPSERT_USER_SQL = """
+    INSERT INTO users (
+        telegram_user_id, username, full_name, plan,
+        fecha_inicio, fecha_fin, estado, created_at, updated_at
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, 'activo', NOW(), NOW())
+    ON CONFLICT (telegram_user_id)
+    DO UPDATE SET
+        username     = EXCLUDED.username,
+        full_name    = EXCLUDED.full_name,
+        plan         = EXCLUDED.plan,
+        fecha_inicio = EXCLUDED.fecha_inicio,
+        fecha_fin    = EXCLUDED.fecha_fin,
+        estado       = 'activo',
+        updated_at   = NOW()
+    RETURNING telegram_user_id, username, full_name, plan, fecha_inicio, fecha_fin, estado
+"""
 
 
-def set_subscription(
-    user_id: int,
-    username: str | None,
-    full_name: str,
-    plan: str,
-    days: int,
-):
+def _extend_user_cur(cur, user_id, username, full_name, plan, today):
     """
-    Asigna una suscripción con fecha_fin = hoy + days, sobreescribiendo
-    cualquier suscripción existente. A diferencia de extend_subscription,
-    NO suma sobre la fecha actual — es una operación 'set', no 'extend'.
-    Pensado para /regalar (cortesía, gifts, fixes).
+    Upsert 'extend' sobre un cursor existente: suma PLAN_DAYS sobre la fecha
+    de fin vigente (o sobre hoy si ya caducó / no existe). Pensado para
+    participar en una transacción mayor.
     """
-    today = today_date()
+    cur.execute(
+        "SELECT fecha_fin FROM users WHERE telegram_user_id = %s",
+        (user_id,),
+    )
+    existing = cur.fetchone()
+    if existing and existing["fecha_fin"]:
+        old_expiry = existing["fecha_fin"]
+        if isinstance(old_expiry, str):
+            old_expiry = parse_date(old_expiry)
+        base_date = old_expiry if old_expiry >= today else today
+        new_expiry = base_date + timedelta(days=PLAN_DAYS)
+    else:
+        new_expiry = today + timedelta(days=PLAN_DAYS)
+    cur.execute(_UPSERT_USER_SQL, (user_id, username, full_name, plan, today, new_expiry))
+    return cur.fetchone()
+
+
+def _set_user_cur(cur, user_id, username, full_name, plan, today, days):
+    """Upsert 'set' sobre un cursor existente: fecha_fin = hoy + days (pisa)."""
     new_expiry = today + timedelta(days=days)
+    cur.execute(_UPSERT_USER_SQL, (user_id, username, full_name, plan, today, new_expiry))
+    return cur.fetchone()
 
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO users (
-                        telegram_user_id, username, full_name, plan,
-                        fecha_inicio, fecha_fin, estado, created_at, updated_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, 'activo', NOW(), NOW())
-                    ON CONFLICT (telegram_user_id)
-                    DO UPDATE SET
-                        username     = EXCLUDED.username,
-                        full_name    = EXCLUDED.full_name,
-                        plan         = EXCLUDED.plan,
-                        fecha_inicio = EXCLUDED.fecha_inicio,
-                        fecha_fin    = EXCLUDED.fecha_fin,
-                        estado       = 'activo',
-                        updated_at   = NOW()
-                    RETURNING telegram_user_id, username, full_name, plan, fecha_inicio, fecha_fin, estado
-                    """,
-                    (user_id, username, full_name, plan, today, new_expiry),
-                )
-                return cur.fetchone()
-    except Exception as e:
-        logger.error("Error en set_subscription para %s: %s", user_id, e)
-        raise
+
+# ── Operaciones compuestas ATÓMICAS ─────────────────────────────────────────
+# Reclamar pago + extender/asignar suscripción + registrar acceso + auditar,
+# todo en UNA transacción. Si algo falla, se revierte todo (incluido el claim
+# del pago pendiente), evitando estados parciales. Los efectos externos de
+# Telegram (expulsión por cambio de plan, avisos) los ejecuta el llamador
+# DESPUÉS del commit, porque no son transaccionales.
+
+def aprobar_pago_tx(user_id: int, plan: str, actor_id: int, via: str):
+    """
+    Aprobación atómica de un pago pendiente. Devuelve (record, plan_anterior,
+    pending) o None si no había pago pendiente (idempotencia: una segunda
+    aprobación no extiende nada).
+    """
+    today = today_date()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            pending = _claim_pending_cur(cur, user_id)
+            if not pending:
+                return None
+
+            cur.execute(
+                "SELECT plan FROM users WHERE telegram_user_id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            plan_anterior = row["plan"] if row else None
+
+            record = _extend_user_cur(
+                cur, user_id, pending["username"], pending["full_name"], plan, today
+            )
+            _registrar_acceso_cur(cur, user_id, plan)
+
+            detalle = via if not plan_anterior else f"{via} plan_anterior={plan_anterior}"
+            _registrar_evento_cur(
+                cur, "aprobacion", target_user_id=user_id, actor_id=actor_id,
+                actor_tipo="admin", plan=plan, fecha_fin=record["fecha_fin"],
+                detalle=detalle,
+            )
+    return record, plan_anterior, pending
+
+
+def renovar_tx(user_id: int, plan: str, username: str | None, full_name: str, actor_id: int):
+    """Renovación manual atómica: extiende + registra acceso + audita.
+    Devuelve (record, plan_anterior)."""
+    today = today_date()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT plan FROM users WHERE telegram_user_id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            plan_anterior = row["plan"] if row else None
+
+            record = _extend_user_cur(cur, user_id, username, full_name, plan, today)
+            _registrar_acceso_cur(cur, user_id, plan)
+            _registrar_evento_cur(
+                cur, "renovacion", target_user_id=user_id, actor_id=actor_id,
+                actor_tipo="admin", plan=plan, fecha_fin=record["fecha_fin"],
+                detalle="via /renovar",
+            )
+    return record, plan_anterior
+
+
+def regalar_tx(
+    user_id: int, plan: str, days: int,
+    username: str | None, full_name: str, actor_id: int,
+):
+    """Regalo atómico: asigna (set) + registra acceso + audita.
+    Devuelve (record, plan_anterior)."""
+    today = today_date()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT plan FROM users WHERE telegram_user_id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            plan_anterior = row["plan"] if row else None
+
+            record = _set_user_cur(cur, user_id, username, full_name, plan, today, days)
+            _registrar_acceso_cur(cur, user_id, plan)
+            _registrar_evento_cur(
+                cur, "regalo", target_user_id=user_id, actor_id=actor_id,
+                actor_tipo="admin", plan=plan, fecha_fin=record["fecha_fin"],
+                detalle=f"{days} días",
+            )
+    return record, plan_anterior
 
 
 async def expulsar_de_canales(context: ContextTypes.DEFAULT_TYPE, user_id: int, plan: str) -> bool:
@@ -1993,49 +2029,22 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 await query.edit_message_text("Plan no válido.")
                 return
 
-            # Reclamamos el pago de forma atómica: la primera aprobación se
-            # queda con la fila; cualquier clic posterior (o segundo mensaje
-            # con botones de otra captura) recibe None y no vuelve a extender.
-            pending = claim_pending_payment(user_id_int)
-            if not pending:
+            # Aprobación ATÓMICA: reclamar pago + extender + registrar acceso
+            # + auditar en una transacción. Idempotente: un segundo clic (o el
+            # botón de otra captura) recibe None y no vuelve a extender. Si la
+            # transacción falla, no se aplica nada (el pago sigue pendiente).
+            result = aprobar_pago_tx(user_id_int, plan, actor_id=admin.id, via="botón")
+            if result is None:
                 await query.edit_message_text(
                     f"⚠️ El usuario {user_id_int} ya no está en pendientes "
                     "(¿ya aprobado o rechazado?)."
                 )
                 return
+            record, plan_anterior, _ = result
 
-            # Plan actual en DB (para detectar cambio de plan)
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT plan FROM users WHERE telegram_user_id = %s",
-                        (user_id_int,),
-                    )
-                    row = cur.fetchone()
-                    plan_anterior = row["plan"] if row else None
-
-            try:
-                record = extend_subscription(
-                    user_id=user_id_int,
-                    username=pending["username"],
-                    full_name=pending["full_name"],
-                    plan=plan,
-                )
-            except Exception:
-                # Si falla la extensión, devolvemos el pago a pendientes para
-                # que el admin pueda reintentar.
-                restore_pending_payment(pending)
-                raise
-
-            # Si cambió de plan, expulsar de los canales que ya no le corresponden
+            # Efectos externos (Telegram) DESPUÉS del commit. Si cambió de plan,
+            # expulsar de los canales que ya no le corresponden.
             await _expulsar_canales_obsoletos(context, user_id_int, plan_anterior, plan)
-
-            registrar_acceso_pendiente(user_id_int, plan)
-            registrar_evento(
-                "aprobacion", target_user_id=user_id_int, actor_id=admin.id,
-                actor_tipo="admin", plan=plan, fecha_fin=record["fecha_fin"],
-                detalle=f"plan_anterior={plan_anterior}" if plan_anterior else None,
-            )
 
             try:
                 await context.bot.send_message(
@@ -2120,49 +2129,27 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Plan no válido. Usa: goles, corners, pre, combo o total")
         return
 
-    # Reclamamos el pago de forma atómica (idempotencia): una segunda
+    # Aprobación ATÓMICA e idempotente (ver aprobar_pago_tx). Una segunda
     # ejecución de /aprobar para el mismo usuario no vuelve a extender.
-    pending = claim_pending_payment(target_user_id)
-    if not pending:
-        await update.message.reply_text(
-            "Ese usuario no está en pendientes (¿ya aprobado o rechazado?)."
-        )
-        return
-
-    # Plan actual en DB (para detectar cambio de plan)
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT plan FROM users WHERE telegram_user_id = %s",
-                (target_user_id,),
-            )
-            row = cur.fetchone()
-            plan_anterior = row["plan"] if row else None
-
     try:
-        record = extend_subscription(
-            user_id=target_user_id,
-            username=pending["username"],
-            full_name=pending["full_name"],
-            plan=plan,
+        result = aprobar_pago_tx(
+            target_user_id, plan, actor_id=update.effective_user.id, via="/aprobar"
         )
     except Exception as e:
-        restore_pending_payment(pending)
         await update.message.reply_text(
             f"⚠️ Error al aprobar (no se aplicó nada): {e}. Reinténtalo."
         )
         return
 
+    if result is None:
+        await update.message.reply_text(
+            "Ese usuario no está en pendientes (¿ya aprobado o rechazado?)."
+        )
+        return
+    record, plan_anterior, _ = result
+
     # Si cambió de plan, expulsar de los canales que ya no le corresponden
     await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
-
-    registrar_acceso_pendiente(target_user_id, plan)
-    registrar_evento(
-        "aprobacion", target_user_id=target_user_id,
-        actor_id=update.effective_user.id, actor_tipo="admin",
-        plan=plan, fecha_fin=record["fecha_fin"],
-        detalle="via /aprobar",
-    )
 
     try:
         await context.bot.send_message(
@@ -2732,22 +2719,21 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     username   = existing["username"] if existing else None
     full_name  = existing["full_name"] if existing else f"Usuario {target_user_id}"
 
-    record = extend_subscription(
-        user_id=target_user_id,
-        username=username,
-        full_name=full_name,
-        plan=plan,
-    )
+    # Renovación ATÓMICA: extender + registrar acceso + auditar en una
+    # transacción. Si falla, no se aplica nada.
+    try:
+        record, plan_anterior = renovar_tx(
+            target_user_id, plan, username, full_name,
+            actor_id=update.effective_user.id,
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"⚠️ Error al renovar (no se aplicó nada): {e}. Reinténtalo."
+        )
+        return
 
     # Si cambió de plan, expulsar de los canales que ya no le corresponden
     await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
-
-    registrar_acceso_pendiente(target_user_id, plan)
-    registrar_evento(
-        "renovacion", target_user_id=target_user_id,
-        actor_id=update.effective_user.id, actor_tipo="admin",
-        plan=plan, fecha_fin=record["fecha_fin"], detalle="via /renovar",
-    )
 
     # Generamos el invite link aquí mismo para devolvérselo al admin,
     # de forma que pueda compartirlo manualmente (WhatsApp, DM, etc.)
@@ -2909,25 +2895,22 @@ async def regalar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             existing = cur.fetchone()
 
-    plan_anterior = existing["plan"] if existing else None
     username  = existing["username"] if existing else None
     full_name = existing["full_name"] if existing else f"Usuario {target_user_id}"
 
+    # Regalo ATÓMICO: asignar (set) + registrar acceso + auditar en una
+    # transacción. Si falla, no se aplica nada.
     try:
-        record = set_subscription(target_user_id, username, full_name, plan, days)
+        record, plan_anterior = regalar_tx(
+            target_user_id, plan, days, username, full_name,
+            actor_id=update.effective_user.id,
+        )
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error al asignar la suscripción: {e}")
         return
 
     # Si el plan anterior incluía canales que ya no están, expulsar
     await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
-
-    registrar_acceso_pendiente(target_user_id, plan)
-    registrar_evento(
-        "regalo", target_user_id=target_user_id,
-        actor_id=update.effective_user.id, actor_tipo="admin",
-        plan=plan, fecha_fin=record["fecha_fin"], detalle=f"{days} días",
-    )
 
     try:
         enlaces = await generar_enlaces_acceso(context, plan)
