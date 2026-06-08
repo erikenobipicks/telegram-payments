@@ -23,6 +23,49 @@ from telegram.ext import (
     filters,
 )
 
+from config import (
+    ADMIN_IDS,
+    BIZUM,
+    CANAL_CORNERS_ID,
+    CANAL_GOLES_ID,
+    CANAL_PRE_ID,
+    CHECK_EXPIRATIONS_EVERY_SECONDS,
+    DATABASE_URL,
+    DEPLOYMENT_COMMIT,
+    INVITE_EXPIRY_HOURS,
+    LINK_FREE,
+    MAX_GENERACIONES_ACCESO,
+    PAYPAL_LINK,
+    PICKS_DATABASE_URL,
+    PLAN_DAYS,
+    PRECIO_COMBO,
+    PRECIO_CORNERS,
+    PRECIO_GOLES,
+    PRECIO_PRE,
+    RATE_LIMITS,
+    REEXPULSION_RETRY_DAYS,
+    REFERIDO_MULTIPLICADOR,
+    REFERIDOR_DIAS,
+    REVOLUT_LINK,
+    STRIPE_COMBO,
+    STRIPE_CORNERS,
+    STRIPE_GOLES,
+    STRIPE_PRE,
+    TIMEZONE,
+    TOKEN,
+    TRIAL_DAYS,
+    _MESES_ES,
+)
+from keyboards import (
+    _confirmar_borrado_markup,
+    _privacidad_markup,
+    acceso_listo_markup,
+    admin_approval_markup,
+    menu_markup,
+    pago_markup,
+    volver_markup,
+)
+
 # ==============================
 # LOGGING
 # ==============================
@@ -54,97 +97,22 @@ logger = logging.getLogger(__name__)
 
 
 # ==============================
-# CONFIG
+# ESTADO EN MEMORIA (las constantes están en config.py)
 # ==============================
-
-TOKEN        = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-# DB de solo lectura del bot de picks (para estadísticas reales)
-PICKS_DATABASE_URL = os.getenv("PICKS_DATABASE_URL")
-
-ADMIN_IDS = [9330181]
-
-CANAL_CORNERS_ID = -1003895151594
-CANAL_GOLES_ID   = -1003818905455
-CANAL_PRE_ID     = -1003837149453   # Over 2.5 FT prepartido — análisis manual
-
-LINK_FREE = "https://t.me/+WhIkP2PstS1kMDVk"
-
-PRECIO_GOLES   = "20€"
-PRECIO_CORNERS = "20€"
-PRECIO_COMBO   = "30€"
-PRECIO_PRE     = "20€"
-
-BIZUM        = "+34660426660"
-PAYPAL_LINK  = "https://paypal.me/erikenobi"
-REVOLUT_LINK = "https://revolut.me/ericblasco9"
-
-STRIPE_GOLES   = "https://buy.stripe.com/aFa8wObuQ9MbdgA00x08g01"
-STRIPE_CORNERS = "https://buy.stripe.com/bJe3cugPaf6vdgA5kR08g02"
-STRIPE_COMBO   = "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
-STRIPE_PRE     = "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
-
-PLAN_DAYS    = 30
-TRIAL_DAYS   = 3
-INVITE_EXPIRY_HOURS = 1
-
-# Referidos: el referidor gana REFERIDOR_DIAS gratis y el recomendado recibe
-# 2x1 (REFERIDO_MULTIPLICADOR × los días normales) en su primer pago.
-REFERIDOR_DIAS = 30
-REFERIDO_MULTIPLICADOR = 2
 
 # Username del bot (sin @), para construir los enlaces de referido. Se rellena
 # al arrancar (post_init) con get_me(); también puede fijarse por entorno.
+# Vive aquí (no en config) porque se reasigna en _post_init.
 BOT_USERNAME = os.getenv("BOT_USERNAME")
-
-# Cada hora: reduce a ≤1h la ventana de acceso residual de un usuario ya
-# caducado (antes 12h). La expulsión es idempotente y, gracias al flag
-# acceso_revocado, no se re-banean usuarios ya expulsados con éxito.
-CHECK_EXPIRATIONS_EVERY_SECONDS = 3600  # 1h
-# Ventana del reintento automático de expulsión: solo se reintenta con
-# caducados recientes (los fallos antiguos se fuerzan a mano con /reexpulsar).
-REEXPULSION_RETRY_DAYS = 7
-
-# Máximo de enlaces de acceso que un usuario puede auto-generar por periodo
-# de suscripción. Limita el reparto de enlaces a terceros. El contador se
-# reinicia con cada aprobación/renovación/regalo (registrar_acceso_pendiente).
-MAX_GENERACIONES_ACCESO = 3
-
-TIMEZONE = "Europe/Madrid"
-
-DEPLOYMENT_COMMIT = (
-    os.getenv("RAILWAY_GIT_COMMIT_SHA")
-    or os.getenv("RAILWAY_GIT_COMMIT_MESSAGE")
-    or os.getenv("RAILWAY_DEPLOYMENT_ID")
-    or "local"
-)
 
 # Avisos de expiración ya enviados en este proceso (evita duplicados entre
 # las dos ejecuciones diarias del job). Se pierde en reinicio, lo cual es
 # aceptable: en el peor caso se envía el aviso dos veces tras un restart.
 _avisos_enviados: set[tuple[int, str]] = set()
 
-# ── Rate limiting en memoria ────────────────────────────────────────────────
-# Bot de proceso único (polling), así que un limitador en memoria basta.
-# Mapea (user_id, acción) -> timestamps monotónicos recientes; se purga al
-# vuelo. Límite por acción: (máx_llamadas, ventana_segundos).
+# Rate limiting en memoria: (user_id, acción) -> timestamps monotónicos
+# recientes; se purga al vuelo. Los límites están en config.RATE_LIMITS.
 _rate_buckets: dict[tuple[int, str], list[float]] = {}
-
-RATE_LIMITS: dict[str, tuple[int, int]] = {
-    "start":       (5, 30),    # comando /start
-    "menu":        (20, 20),   # navegación de botones (callbacks)
-    "trial":       (3, 30),    # activación de prueba gratuita
-    "acceso":      (2, 20),    # generación de enlaces (llama a la API Telegram)
-    "comprobante": (4, 60),    # reenvío de comprobantes al admin
-}
-
-# Meses en español para formateo de stats
-_MESES_ES = {
-    "01": "Ene", "02": "Feb", "03": "Mar", "04": "Abr",
-    "05": "May", "06": "Jun", "07": "Jul", "08": "Ago",
-    "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dic",
-}
 
 
 # ==============================
@@ -1491,79 +1459,6 @@ async def _expulsar_canales_obsoletos(
             )
 
 
-# ==============================
-# MARKUPS
-# ==============================
-
-def menu_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("ℹ️ Cómo funciona", callback_data="info"),
-            InlineKeyboardButton("📊 Estadísticas",  callback_data="stats"),
-        ],
-        [InlineKeyboardButton("📋 Guía de pago",     callback_data="guia")],
-        [InlineKeyboardButton("🆓 Canal FREE",        callback_data="free")],
-        [
-            InlineKeyboardButton("⚽ GOLES — 20€",   callback_data="goles"),
-            InlineKeyboardButton("🚩 CORNERS — 20€", callback_data="corners"),
-        ],
-        [InlineKeyboardButton("🔥 GOLES + CORNERS — 30€", callback_data="combo")],
-        [InlineKeyboardButton("📊 PREPARTIDO — 20€", callback_data="pre")],
-        [InlineKeyboardButton("🎁 Invitar amigos (gana 1 mes)", callback_data="referido")],
-        [InlineKeyboardButton("💬 Contacto",          url="https://t.me/erikenobi")],
-    ])
-
-
-def volver_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")]]
-    )
-
-
-def pago_markup(plan: str) -> InlineKeyboardMarkup:
-    precios = {"goles": "20", "corners": "20", "combo": "30", "pre": "20"}
-    stripes = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO, "pre": STRIPE_PRE}
-    importe = precios.get(plan, "")
-
-    stripe_url = stripes.get(plan, "")
-    keyboard = [
-        [InlineKeyboardButton(
-            f"🎁 Probar gratis {TRIAL_DAYS} días",
-            callback_data=f"trial:{plan}",
-        )],
-    ]
-    if stripe_url:
-        keyboard.append([InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=stripe_url)])
-    keyboard += [
-        [InlineKeyboardButton("🅿️ Pagar con PayPal",           url=f"{PAYPAL_LINK}/{importe}")],
-        [InlineKeyboardButton("📲 Bizum",   callback_data=f"bizum:{plan}"),
-         InlineKeyboardButton("🟣 Revolut", callback_data=f"revolut:{plan}")],
-        [InlineKeyboardButton("📋 ¿Cómo activo el acceso?", callback_data="guia")],
-        [InlineKeyboardButton("⬅️ Volver al menú",          callback_data="menu")],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-def admin_approval_markup(user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Aprobar GOLES",   callback_data=f"approve:goles:{user_id}"),
-            InlineKeyboardButton("✅ Aprobar CORNERS", callback_data=f"approve:corners:{user_id}"),
-        ],
-        [
-            InlineKeyboardButton("✅ Aprobar PRE",   callback_data=f"approve:pre:{user_id}"),
-            InlineKeyboardButton("✅ Aprobar COMBO", callback_data=f"approve:combo:{user_id}"),
-        ],
-        [InlineKeyboardButton("❌ Rechazar", callback_data=f"reject:{user_id}")],
-    ])
-
-
-def acceso_listo_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔑 Obtener mi acceso", callback_data="obtener_acceso")]]
-    )
-
-
 def registrar_visitante(user_id: int, username: str | None, full_name: str) -> bool:
     """
     Registra al usuario en bot_visitors si es la primera vez.
@@ -1647,11 +1542,81 @@ def stats_referidos(user_id: int) -> dict:
         return {"total": 0, "recompensados": 0}
 
 
+def get_pendientes_promo_referido() -> list[dict]:
+    """
+    Usuarios ACTIVOS (sub vigente) a los que aún NO se ha enviado la promo de
+    referidos (no hay evento 'promo_referido' en audit_log). Permite relanzar
+    el aviso sin spamear a quien ya lo recibió.
+    """
+    today = today_date()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT u.telegram_user_id, u.full_name
+                FROM users u
+                WHERE u.estado = 'activo' AND u.fecha_fin >= %s
+                  AND NOT EXISTS (
+                      SELECT 1 FROM audit_log a
+                      WHERE a.target_user_id = u.telegram_user_id
+                        AND a.event = 'promo_referido'
+                  )
+                ORDER BY u.fecha_fin ASC
+                """,
+                (today,),
+            )
+            return cur.fetchall()
+
+
 def referral_link(user_id: int) -> str | None:
     """Enlace de referido del usuario. None si aún no se conoce el username del bot."""
     if not BOT_USERNAME:
         return None
     return f"https://t.me/{BOT_USERNAME}?start=ref{user_id}"
+
+
+# ==============================
+# DB — RGPD / DATOS PERSONALES
+# ==============================
+
+def get_user_plan(user_id: int) -> str | None:
+    """Plan vigente del usuario (para saber de qué canales expulsarlo). None si no hay fila."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT plan FROM users WHERE telegram_user_id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+    return row["plan"] if row else None
+
+
+def borrar_datos_usuario(user_id: int) -> dict:
+    """
+    Borra (derecho al olvido, RGPD) los datos personales del usuario de todas
+    las tablas con PII, en una sola transacción. NO toca audit_log: los
+    registros de transacciones/accesos se conservan por interés legítimo y
+    obligación contable (solo contienen id, plan y fechas, no nombre/username).
+    Devuelve un dict tabla → nº de filas borradas.
+    """
+    counts: dict[str, int] = {}
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            for tabla in (
+                "users", "bot_visitors", "encuestas",
+                "pending_payments", "pending_access", "trials",
+            ):
+                cur.execute(
+                    f"DELETE FROM {tabla} WHERE telegram_user_id = %s",
+                    (user_id,),
+                )
+                counts[tabla] = cur.rowcount
+            cur.execute(
+                "DELETE FROM referrals WHERE referred_user_id = %s OR referrer_user_id = %s",
+                (user_id, user_id),
+            )
+            counts["referrals"] = cur.rowcount
+    return counts
 
 
 # ==============================
@@ -1795,6 +1760,171 @@ async def referido_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(texto, reply_markup=markup, parse_mode="Markdown")
 
 
+async def promo_referidos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    (Admin) Anuncia el programa de referidos a los usuarios premium activos
+    que aún no han sido avisados. Pide confirmación antes de enviar nada.
+    Uso: /promo_referidos
+    """
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    pendientes = await _run_db(get_pendientes_promo_referido)
+    if not pendientes:
+        await update.message.reply_text(
+            "No hay usuarios activos pendientes de avisar (ya se avisó a todos)."
+        )
+        return
+
+    await update.message.reply_text(
+        f"📣 Vas a enviar la *promo de referidos* a *{len(pendientes)}* usuarios "
+        "activos que aún no la han recibido.\n\n"
+        "Cada uno recibirá su enlace personal. ¿Enviar ahora?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Enviar ahora", callback_data="promoref:enviar")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="promoref:cancelar")],
+        ]),
+        parse_mode="Markdown",
+    )
+
+
+async def promo_referidos_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gestiona la confirmación del envío de la promo de referidos (admin)."""
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS:
+        await query.edit_message_text("No tienes permisos.")
+        return
+
+    if query.data == "promoref:cancelar":
+        await query.edit_message_text("Cancelado. No se ha enviado nada.")
+        return
+
+    pendientes = await _run_db(get_pendientes_promo_referido)
+    if not pendientes:
+        await query.edit_message_text("No hay usuarios pendientes de avisar.")
+        return
+
+    await query.edit_message_text(f"📣 Enviando promo de referidos a {len(pendientes)} usuarios…")
+
+    enviados = 0
+    fallidos = 0
+    for fila in pendientes:
+        uid = int(fila["telegram_user_id"])
+        try:
+            texto, markup = await _panel_referido(uid)
+            await context.bot.send_message(
+                chat_id=uid,
+                text="🎁 *¡Novedad! Gana 1 mes gratis*\n\n" + texto,
+                reply_markup=markup,
+                parse_mode="Markdown",
+            )
+            await _run_db(
+                registrar_evento, "promo_referido",
+                target_user_id=uid, actor_id=query.from_user.id, actor_tipo="admin",
+            )
+            enviados += 1
+        except Exception as e:
+            fallidos += 1
+            logger.warning("No se pudo enviar promo de referidos a %s: %s", uid, e)
+        await asyncio.sleep(0.05)  # ~20 msg/s, dentro de los límites de Telegram
+
+    await query.edit_message_text(
+        f"✅ Promo de referidos enviada.\n"
+        f"Enviados: {enviados}\nFallidos (bloquearon el bot, etc.): {fallidos}"
+    )
+    logger.info("Promo referidos: enviados=%d fallidos=%d", enviados, fallidos)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# RGPD — aviso de privacidad y borrado de datos
+# ──────────────────────────────────────────────────────────────────────────
+
+def _texto_privacidad() -> str:
+    return (
+        "🔒 *Privacidad y datos*\n\n"
+        "*Qué guardamos:* tu ID de Telegram, tu username y nombre, y los datos "
+        "de tu suscripción (plan, fechas, estado, pagos pendientes y registro "
+        "de accesos).\n\n"
+        "*Para qué:* únicamente para gestionar tu suscripción y tu acceso a los "
+        "canales. No vendemos ni cedemos tus datos a terceros.\n\n"
+        "*Cuánto tiempo:* mientras seas usuario del servicio. Los registros de "
+        "transacciones y accesos se conservan por obligación contable/legal "
+        "(solo contienen identificador, plan y fechas).\n\n"
+        "*Tus derechos:* acceso, rectificación y borrado. Para borrar tus datos "
+        "pulsa el botón de abajo o usa /borrar_datos (ten en cuenta que esto "
+        "cancela tu suscripción y tu acceso a los canales).\n\n"
+        "*Contacto:* @erikenobi"
+    )
+
+
+async def privacidad_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra el aviso de privacidad. Uso: /privacidad"""
+    await update.message.reply_text(
+        _texto_privacidad(), reply_markup=_privacidad_markup(), parse_mode="Markdown"
+    )
+
+
+async def borrar_datos_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pide confirmación para borrar los datos del usuario. Uso: /borrar_datos"""
+    await update.message.reply_text(
+        "⚠️ *¿Seguro que quieres borrar tus datos?*\n\n"
+        "Se eliminará tu información personal y se *cancelará tu suscripción y "
+        "tu acceso* a los canales. Esta acción no se puede deshacer.",
+        reply_markup=_confirmar_borrado_markup(),
+        parse_mode="Markdown",
+    )
+
+
+async def borrar_datos_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gestiona los callbacks `borrar:*` (pedir confirmación / confirmar borrado)."""
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    data = query.data
+
+    if data == "borrar:pedir":
+        await query.edit_message_text(
+            "⚠️ *¿Seguro que quieres borrar tus datos?*\n\n"
+            "Se eliminará tu información personal y se *cancelará tu suscripción "
+            "y tu acceso* a los canales. Esta acción no se puede deshacer.",
+            reply_markup=_confirmar_borrado_markup(),
+            parse_mode="Markdown",
+        )
+        return
+
+    if data == "borrar:confirm":
+        # Expulsar de sus canales antes de borrar (luego ya no sabremos el plan).
+        plan = await _run_db(get_user_plan, user.id)
+        if plan:
+            await expulsar_de_canales(context, user.id, plan)
+        counts = await _run_db(borrar_datos_usuario, user.id)
+        await _run_db(
+            registrar_evento, "datos_borrados",
+            target_user_id=user.id, actor_id=user.id, actor_tipo="user",
+            detalle=str(counts),
+        )
+        await query.edit_message_text(
+            "✅ *Datos borrados*\n\n"
+            "Hemos eliminado tu información personal y retirado tu acceso a los "
+            "canales. Si quieres volver en el futuro, usa /start.\n\n"
+            "_(Conservamos el registro contable de transacciones por obligación "
+            "legal, sin tu nombre ni username.)_",
+            parse_mode="Markdown",
+        )
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🗑 El usuario {user.id} ejerció su derecho al olvido (RGPD). Borrado: {counts}",
+                )
+            except Exception as e:
+                logger.error("Error avisando borrado de datos al admin %s: %s", admin_id, e)
+        logger.info("RGPD: datos borrados para usuario %s (%s)", user.id, counts)
+        return
+
+
 async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = query.from_user
@@ -1917,6 +2047,12 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if plan == "referido":
         texto, markup = await _panel_referido(user.id)
         await query.edit_message_text(texto, reply_markup=markup, parse_mode="Markdown")
+        return
+
+    if plan == "privacidad":
+        await query.edit_message_text(
+            _texto_privacidad(), reply_markup=_privacidad_markup(), parse_mode="Markdown"
+        )
         return
 
     _GUIA_PAGO = (
@@ -2129,7 +2265,6 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         _, plan_real = plan.split(":", 1)
         importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre": PRECIO_PRE}
         importe  = importes.get(plan_real, "consultar")
-        revolut_escaped = REVOLUT_LINK.replace(".", "\\.").replace("-", "\\-")
         await query.edit_message_text(
             f"🟣 *Pago por Revolut*\n\n"
             f"Plan: *{plan_real.upper()}*\n"
@@ -2872,6 +3007,8 @@ _EVENT_EMOJI = {
     "cancelacion":      "🛑",
     "reembolso":        "💸",
     "referido_recompensa": "🎁",
+    "promo_referido":   "📣",
+    "datos_borrados":   "🗑",
     "acceso_entregado": "🔑",
 }
 
@@ -3250,7 +3387,7 @@ async def encuestas_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     media = (sum(valoraciones) / len(valoraciones)) if valoraciones else None
 
     lineas = [
-        f"📊 Encuestas — resumen\n",
+        "📊 Encuestas — resumen\n",
         f"Enviadas: {enviadas}",
         f"Respondidas: {respondidas}",
         f"Rechazaron: {rechazadas}",
@@ -4228,6 +4365,9 @@ def main() -> None:
     app.add_handler(CommandHandler("help",          help_command))
     app.add_handler(CommandHandler("whoami",        whoami))
     app.add_handler(CommandHandler("referido",      referido_command))
+    app.add_handler(CommandHandler("promo_referidos", promo_referidos))
+    app.add_handler(CommandHandler("privacidad",    privacidad_command))
+    app.add_handler(CommandHandler("borrar_datos",  borrar_datos_command))
     app.add_handler(CommandHandler("aprobar",       aprobar))
     app.add_handler(CommandHandler("rechazar",      rechazar))
     app.add_handler(CommandHandler("estado",        estado))
@@ -4252,6 +4392,8 @@ def main() -> None:
 
     app.add_handler(CallbackQueryHandler(admin_action_callback, pattern=r"^(approve:|reject:)"))
     app.add_handler(CallbackQueryHandler(encuesta_callback, pattern=r"^enc:"))
+    app.add_handler(CallbackQueryHandler(borrar_datos_callback, pattern=r"^borrar:"))
+    app.add_handler(CallbackQueryHandler(promo_referidos_callback, pattern=r"^promoref:"))
     app.add_handler(CallbackQueryHandler(seleccionar_plan))
 
     # Auto-aprobación de solicitudes de unión a los canales (enlaces con

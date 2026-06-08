@@ -1,0 +1,9 @@
+# Configuración del linter (ruff). Reglas por defecto (E4/E7/E9 + F de
+# pyflakes: nombres indefinidos, imports/variables sin usar, etc.). No se
+# fuerza longitud de línea para no pelear con el estilo existente.
+target-version = "py311"
+line-length = 120
+
+[lint]
+# F = pyflakes (errores reales), E/W = pycodestyle básicos.
+select = ["E4", "E7", "E9", "F", "W"]
