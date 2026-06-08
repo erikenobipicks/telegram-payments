@@ -84,7 +84,13 @@ STRIPE_PRE     = "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
 PLAN_DAYS    = 30
 TRIAL_DAYS   = 3
 INVITE_EXPIRY_HOURS = 1
-CHECK_EXPIRATIONS_EVERY_SECONDS = 43200  # 12h
+# Cada hora: reduce a ≤1h la ventana de acceso residual de un usuario ya
+# caducado (antes 12h). La expulsión es idempotente y, gracias al flag
+# acceso_revocado, no se re-banean usuarios ya expulsados con éxito.
+CHECK_EXPIRATIONS_EVERY_SECONDS = 3600  # 1h
+# Ventana del reintento automático de expulsión: solo se reintenta con
+# caducados recientes (los fallos antiguos se fuerzan a mano con /reexpulsar).
+REEXPULSION_RETRY_DAYS = 7
 
 # Máximo de enlaces de acceso que un usuario puede auto-generar por periodo
 # de suscripción. Limita el reparto de enlaces a terceros. El contador se
@@ -158,6 +164,16 @@ def init_db():
                     created_at       TIMESTAMP NOT NULL DEFAULT NOW(),
                     updated_at       TIMESTAMP NOT NULL DEFAULT NOW()
                 );
+                """
+            )
+            # Flag de control de expulsión: TRUE cuando el acceso a los canales
+            # ya se ha revocado con éxito. Evita re-banear en cada ciclo del job
+            # a usuarios ya expulsados (clave al bajar el intervalo a 1h). Se
+            # reinicia a FALSE cuando el usuario se reactiva (ver _UPSERT_USER_SQL).
+            cur.execute(
+                """
+                ALTER TABLE users
+                    ADD COLUMN IF NOT EXISTS acceso_revocado BOOLEAN NOT NULL DEFAULT FALSE;
                 """
             )
             cur.execute(
@@ -993,15 +1009,30 @@ _UPSERT_USER_SQL = """
     VALUES (%s, %s, %s, %s, %s, %s, 'activo', NOW(), NOW())
     ON CONFLICT (telegram_user_id)
     DO UPDATE SET
-        username     = EXCLUDED.username,
-        full_name    = EXCLUDED.full_name,
-        plan         = EXCLUDED.plan,
-        fecha_inicio = EXCLUDED.fecha_inicio,
-        fecha_fin    = EXCLUDED.fecha_fin,
-        estado       = 'activo',
-        updated_at   = NOW()
+        username        = EXCLUDED.username,
+        full_name       = EXCLUDED.full_name,
+        plan            = EXCLUDED.plan,
+        fecha_inicio    = EXCLUDED.fecha_inicio,
+        fecha_fin       = EXCLUDED.fecha_fin,
+        estado          = 'activo',
+        acceso_revocado = FALSE,
+        updated_at      = NOW()
     RETURNING telegram_user_id, username, full_name, plan, fecha_inicio, fecha_fin, estado
 """
+
+
+def marcar_acceso_revocado(user_id: int, revocado: bool = True) -> None:
+    """Marca si el acceso a los canales ya se ha revocado (best-effort)."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET acceso_revocado = %s, updated_at = NOW() "
+                    "WHERE telegram_user_id = %s",
+                    (revocado, user_id),
+                )
+    except Exception as e:
+        logger.error("Error marcando acceso_revocado para %s: %s", user_id, e)
 
 
 def _extend_user_cur(cur, user_id, username, full_name, plan, today):
@@ -2986,8 +3017,9 @@ async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE users SET estado = 'caducado', updated_at = NOW() WHERE telegram_user_id = %s",
-                (target_user_id,),
+                "UPDATE users SET estado = 'caducado', acceso_revocado = %s, "
+                "updated_at = NOW() WHERE telegram_user_id = %s",
+                (ok, target_user_id),
             )
 
     registrar_evento(
@@ -3024,7 +3056,7 @@ async def reexpulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 """
                 SELECT telegram_user_id, plan, full_name, username, fecha_fin
                 FROM users
-                WHERE estado = 'caducado' AND fecha_fin < %s
+                WHERE estado = 'caducado' AND acceso_revocado = FALSE AND fecha_fin < %s
                 ORDER BY fecha_fin ASC
                 """,
                 (today,),
@@ -3048,6 +3080,7 @@ async def reexpulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             ok = False
         if ok:
             ok_count += 1
+            marcar_acceso_revocado(int(user_id), True)
         marca = "✅" if ok else "❌"
         lineas.append(f"{marca} {user_id} | {nombre} | {plan} | fin {row['fecha_fin']}")
 
@@ -3221,8 +3254,9 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                 with get_conn() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
-                            "UPDATE users SET estado = 'caducado', updated_at = NOW() WHERE telegram_user_id = %s",
-                            (user_id,),
+                            "UPDATE users SET estado = 'caducado', acceso_revocado = %s, "
+                            "updated_at = NOW() WHERE telegram_user_id = %s",
+                            (expulsado_ok, user_id),
                         )
 
                 if es_trial:
@@ -3265,7 +3299,7 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                                     f"⚠️ No se pudo expulsar al usuario {user_id} "
                                     f"({record['plan']}) tras caducar.\n"
                                     "Está marcado como caducado pero sigue en el canal.\n"
-                                    "Se reintentará automáticamente cada 12h. "
+                                    "Se reintentará automáticamente cada hora. "
                                     "Usa /reexpulsar para forzarlo ahora."
                                 ),
                             )
@@ -3275,18 +3309,22 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             logger.error(f"Error revisando expiración de {record.get('telegram_user_id')}: {e}")
 
-    # ── Segunda pasada: reintentar expulsión de usuarios que ya están
-    # marcados como `caducado` pero pueden seguir en el canal porque
-    # el ban falló en su momento.
+    # ── Segunda pasada: reintentar expulsión SOLO de los caducados recientes
+    # cuyo acceso aún no se ha revocado con éxito (acceso_revocado = FALSE).
+    # El flag evita re-banear en cada ciclo a los ya expulsados, y la ventana
+    # de REEXPULSION_RETRY_DAYS evita re-escanear el histórico antiguo.
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT telegram_user_id, plan
                 FROM users
-                WHERE estado = 'caducado' AND fecha_fin < %s
+                WHERE estado = 'caducado'
+                  AND acceso_revocado = FALSE
+                  AND fecha_fin < %s
+                  AND fecha_fin >= %s
                 """,
-                (today,),
+                (today, today - timedelta(days=REEXPULSION_RETRY_DAYS)),
             )
             pendientes = cur.fetchall()
 
@@ -3295,6 +3333,7 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
             user_id = record["telegram_user_id"]
             ok = await expulsar_de_canales(context, int(user_id), record["plan"])
             if ok:
+                marcar_acceso_revocado(int(user_id), True)
                 logger.info("Reintento de expulsión exitoso: %s (%s)", user_id, record["plan"])
         except Exception as e:
             logger.error(
