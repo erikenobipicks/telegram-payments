@@ -160,6 +160,7 @@ def _callbacks(markup):
 def test_menu_markup_tiene_referido_y_planes():
     cbs = _callbacks(p.menu_markup())
     assert "referido" in cbs
+    assert "privacidad" in cbs
     for plan in ("goles", "corners", "combo", "pre"):
         assert plan in cbs
 
@@ -185,6 +186,22 @@ def test_volver_y_acceso_markups():
 # ──────────────────────────────────────────────────────────────────────────
 # _formatear_evento
 # ──────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────
+# RGPD — aviso de privacidad y borrado
+# ──────────────────────────────────────────────────────────────────────────
+def test_texto_privacidad_contenido():
+    txt = p._texto_privacidad()
+    assert "/borrar_datos" in txt
+    assert "@erikenobi" in txt
+    # menciona los derechos básicos del RGPD
+    assert "borrado" in txt.lower()
+
+
+def test_markups_borrado():
+    assert "borrar:pedir" in _callbacks(p._privacidad_markup())
+    assert "borrar:confirm" in _callbacks(p._confirmar_borrado_markup())
+
+
 def test_formatear_evento():
     row = {
         "created_at": dt.datetime(2026, 6, 8, 10, 30),

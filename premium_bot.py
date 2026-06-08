@@ -1510,7 +1510,10 @@ def menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔥 GOLES + CORNERS — 30€", callback_data="combo")],
         [InlineKeyboardButton("📊 PREPARTIDO — 20€", callback_data="pre")],
         [InlineKeyboardButton("🎁 Invitar amigos (gana 1 mes)", callback_data="referido")],
-        [InlineKeyboardButton("💬 Contacto",          url="https://t.me/erikenobi")],
+        [
+            InlineKeyboardButton("🔒 Privacidad", callback_data="privacidad"),
+            InlineKeyboardButton("💬 Contacto",   url="https://t.me/erikenobi"),
+        ],
     ])
 
 
@@ -1655,6 +1658,50 @@ def referral_link(user_id: int) -> str | None:
 
 
 # ==============================
+# DB — RGPD / DATOS PERSONALES
+# ==============================
+
+def get_user_plan(user_id: int) -> str | None:
+    """Plan vigente del usuario (para saber de qué canales expulsarlo). None si no hay fila."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT plan FROM users WHERE telegram_user_id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+    return row["plan"] if row else None
+
+
+def borrar_datos_usuario(user_id: int) -> dict:
+    """
+    Borra (derecho al olvido, RGPD) los datos personales del usuario de todas
+    las tablas con PII, en una sola transacción. NO toca audit_log: los
+    registros de transacciones/accesos se conservan por interés legítimo y
+    obligación contable (solo contienen id, plan y fechas, no nombre/username).
+    Devuelve un dict tabla → nº de filas borradas.
+    """
+    counts: dict[str, int] = {}
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            for tabla in (
+                "users", "bot_visitors", "encuestas",
+                "pending_payments", "pending_access", "trials",
+            ):
+                cur.execute(
+                    f"DELETE FROM {tabla} WHERE telegram_user_id = %s",
+                    (user_id,),
+                )
+                counts[tabla] = cur.rowcount
+            cur.execute(
+                "DELETE FROM referrals WHERE referred_user_id = %s OR referrer_user_id = %s",
+                (user_id, user_id),
+            )
+            counts["referrals"] = cur.rowcount
+    return counts
+
+
+# ==============================
 # USER FLOW
 # ==============================
 
@@ -1795,6 +1842,108 @@ async def referido_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(texto, reply_markup=markup, parse_mode="Markdown")
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# RGPD — aviso de privacidad y borrado de datos
+# ──────────────────────────────────────────────────────────────────────────
+
+def _texto_privacidad() -> str:
+    return (
+        "🔒 *Privacidad y datos*\n\n"
+        "*Qué guardamos:* tu ID de Telegram, tu username y nombre, y los datos "
+        "de tu suscripción (plan, fechas, estado, pagos pendientes y registro "
+        "de accesos).\n\n"
+        "*Para qué:* únicamente para gestionar tu suscripción y tu acceso a los "
+        "canales. No vendemos ni cedemos tus datos a terceros.\n\n"
+        "*Cuánto tiempo:* mientras seas usuario del servicio. Los registros de "
+        "transacciones y accesos se conservan por obligación contable/legal "
+        "(solo contienen identificador, plan y fechas).\n\n"
+        "*Tus derechos:* acceso, rectificación y borrado. Para borrar tus datos "
+        "pulsa el botón de abajo o usa /borrar_datos (ten en cuenta que esto "
+        "cancela tu suscripción y tu acceso a los canales).\n\n"
+        "*Contacto:* @erikenobi"
+    )
+
+
+def _privacidad_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑 Borrar mis datos", callback_data="borrar:pedir")],
+        [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
+    ])
+
+
+def _confirmar_borrado_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Sí, borrar todo", callback_data="borrar:confirm")],
+        [InlineKeyboardButton("❌ No, cancelar", callback_data="menu")],
+    ])
+
+
+async def privacidad_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra el aviso de privacidad. Uso: /privacidad"""
+    await update.message.reply_text(
+        _texto_privacidad(), reply_markup=_privacidad_markup(), parse_mode="Markdown"
+    )
+
+
+async def borrar_datos_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pide confirmación para borrar los datos del usuario. Uso: /borrar_datos"""
+    await update.message.reply_text(
+        "⚠️ *¿Seguro que quieres borrar tus datos?*\n\n"
+        "Se eliminará tu información personal y se *cancelará tu suscripción y "
+        "tu acceso* a los canales. Esta acción no se puede deshacer.",
+        reply_markup=_confirmar_borrado_markup(),
+        parse_mode="Markdown",
+    )
+
+
+async def borrar_datos_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gestiona los callbacks `borrar:*` (pedir confirmación / confirmar borrado)."""
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    data = query.data
+
+    if data == "borrar:pedir":
+        await query.edit_message_text(
+            "⚠️ *¿Seguro que quieres borrar tus datos?*\n\n"
+            "Se eliminará tu información personal y se *cancelará tu suscripción "
+            "y tu acceso* a los canales. Esta acción no se puede deshacer.",
+            reply_markup=_confirmar_borrado_markup(),
+            parse_mode="Markdown",
+        )
+        return
+
+    if data == "borrar:confirm":
+        # Expulsar de sus canales antes de borrar (luego ya no sabremos el plan).
+        plan = await _run_db(get_user_plan, user.id)
+        if plan:
+            await expulsar_de_canales(context, user.id, plan)
+        counts = await _run_db(borrar_datos_usuario, user.id)
+        await _run_db(
+            registrar_evento, "datos_borrados",
+            target_user_id=user.id, actor_id=user.id, actor_tipo="user",
+            detalle=str(counts),
+        )
+        await query.edit_message_text(
+            "✅ *Datos borrados*\n\n"
+            "Hemos eliminado tu información personal y retirado tu acceso a los "
+            "canales. Si quieres volver en el futuro, usa /start.\n\n"
+            "_(Conservamos el registro contable de transacciones por obligación "
+            "legal, sin tu nombre ni username.)_",
+            parse_mode="Markdown",
+        )
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🗑 El usuario {user.id} ejerció su derecho al olvido (RGPD). Borrado: {counts}",
+                )
+            except Exception as e:
+                logger.error("Error avisando borrado de datos al admin %s: %s", admin_id, e)
+        logger.info("RGPD: datos borrados para usuario %s (%s)", user.id, counts)
+        return
+
+
 async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = query.from_user
@@ -1917,6 +2066,12 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if plan == "referido":
         texto, markup = await _panel_referido(user.id)
         await query.edit_message_text(texto, reply_markup=markup, parse_mode="Markdown")
+        return
+
+    if plan == "privacidad":
+        await query.edit_message_text(
+            _texto_privacidad(), reply_markup=_privacidad_markup(), parse_mode="Markdown"
+        )
         return
 
     _GUIA_PAGO = (
@@ -2871,6 +3026,7 @@ _EVENT_EMOJI = {
     "cancelacion":      "🛑",
     "reembolso":        "💸",
     "referido_recompensa": "🎁",
+    "datos_borrados":   "🗑",
     "acceso_entregado": "🔑",
 }
 
@@ -4227,6 +4383,8 @@ def main() -> None:
     app.add_handler(CommandHandler("help",          help_command))
     app.add_handler(CommandHandler("whoami",        whoami))
     app.add_handler(CommandHandler("referido",      referido_command))
+    app.add_handler(CommandHandler("privacidad",    privacidad_command))
+    app.add_handler(CommandHandler("borrar_datos",  borrar_datos_command))
     app.add_handler(CommandHandler("aprobar",       aprobar))
     app.add_handler(CommandHandler("rechazar",      rechazar))
     app.add_handler(CommandHandler("estado",        estado))
@@ -4251,6 +4409,7 @@ def main() -> None:
 
     app.add_handler(CallbackQueryHandler(admin_action_callback, pattern=r"^(approve:|reject:)"))
     app.add_handler(CallbackQueryHandler(encuesta_callback, pattern=r"^enc:"))
+    app.add_handler(CallbackQueryHandler(borrar_datos_callback, pattern=r"^borrar:"))
     app.add_handler(CallbackQueryHandler(seleccionar_plan))
 
     # Auto-aprobación de solicitudes de unión a los canales (enlaces con
