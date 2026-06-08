@@ -321,18 +321,33 @@ def calcular_strike(hits: int, misses: int) -> float:
     return round((hits / resueltos) * 100, 1) if resueltos > 0 else 0.0
 
 
+# Caché en memoria de las stats reales: estas 3 consultas GROUP BY son
+# pesadas y se piden en cada vista de plan/stats. Con TTL evitamos golpear
+# la picks DB en cada clic. Los datos cambian poco (resultados de picks),
+# así que un TTL de minutos es de sobra.
+_STATS_CACHE_TTL_SECONDS = 600  # 10 min
+_stats_cache: dict = {"data": None, "ts": 0.0}
+
+
 def get_stats_reales() -> dict | None:
     """
-    Obtiene estadísticas reales del bot de picks:
+    Obtiene estadísticas reales del bot de picks (con caché de
+    _STATS_CACHE_TTL_SECONDS):
       - globales: strike total por tipo_pick
       - ultimo_mes: stats del mes anterior cerrado
       - mes_label: "YYYY-MM" del último mes
       - evolucion: stats agrupadas por mes/tipo de los últimos 6 meses
-    Devuelve None si la conexión falla o no hay datos.
+    Si la conexión o la consulta falla, devuelve lo último cacheado (aunque
+    esté algo viejo) o None si no hay nada cacheado.
     """
+    now = monotonic()
+    cached = _stats_cache["data"]
+    if cached is not None and (now - _stats_cache["ts"]) < _STATS_CACHE_TTL_SECONDS:
+        return cached
+
     conn = get_picks_conn()
     if not conn:
-        return None
+        return cached
 
     try:
         with conn:
@@ -396,16 +411,19 @@ def get_stats_reales() -> dict | None:
                 """)
                 evolucion = cur.fetchall()
 
-        return {
+        result = {
             "globales":   globales,
             "ultimo_mes": ultimo_mes,
             "mes_label":  mes_label,
             "evolucion":  evolucion,
         }
+        _stats_cache["data"] = result
+        _stats_cache["ts"] = now
+        return result
 
     except Exception as e:
         logger.error(f"Error obteniendo stats reales: {e}")
-        return None
+        return cached
 
 
 def _get_strike_tipo(stats: dict | None, tipo: str) -> str | None:
