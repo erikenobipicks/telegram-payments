@@ -1542,6 +1542,32 @@ def stats_referidos(user_id: int) -> dict:
         return {"total": 0, "recompensados": 0}
 
 
+def get_pendientes_promo_referido() -> list[dict]:
+    """
+    Usuarios ACTIVOS (sub vigente) a los que aún NO se ha enviado la promo de
+    referidos (no hay evento 'promo_referido' en audit_log). Permite relanzar
+    el aviso sin spamear a quien ya lo recibió.
+    """
+    today = today_date()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT u.telegram_user_id, u.full_name
+                FROM users u
+                WHERE u.estado = 'activo' AND u.fecha_fin >= %s
+                  AND NOT EXISTS (
+                      SELECT 1 FROM audit_log a
+                      WHERE a.target_user_id = u.telegram_user_id
+                        AND a.event = 'promo_referido'
+                  )
+                ORDER BY u.fecha_fin ASC
+                """,
+                (today,),
+            )
+            return cur.fetchall()
+
+
 def referral_link(user_id: int) -> str | None:
     """Enlace de referido del usuario. None si aún no se conoce el username del bot."""
     if not BOT_USERNAME:
@@ -1732,6 +1758,83 @@ async def referido_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await _run_db(registrar_visitante, user.id, user.username, user.full_name)
     texto, markup = await _panel_referido(user.id)
     await update.message.reply_text(texto, reply_markup=markup, parse_mode="Markdown")
+
+
+async def promo_referidos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    (Admin) Anuncia el programa de referidos a los usuarios premium activos
+    que aún no han sido avisados. Pide confirmación antes de enviar nada.
+    Uso: /promo_referidos
+    """
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    pendientes = await _run_db(get_pendientes_promo_referido)
+    if not pendientes:
+        await update.message.reply_text(
+            "No hay usuarios activos pendientes de avisar (ya se avisó a todos)."
+        )
+        return
+
+    await update.message.reply_text(
+        f"📣 Vas a enviar la *promo de referidos* a *{len(pendientes)}* usuarios "
+        "activos que aún no la han recibido.\n\n"
+        "Cada uno recibirá su enlace personal. ¿Enviar ahora?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Enviar ahora", callback_data="promoref:enviar")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="promoref:cancelar")],
+        ]),
+        parse_mode="Markdown",
+    )
+
+
+async def promo_referidos_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gestiona la confirmación del envío de la promo de referidos (admin)."""
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in ADMIN_IDS:
+        await query.edit_message_text("No tienes permisos.")
+        return
+
+    if query.data == "promoref:cancelar":
+        await query.edit_message_text("Cancelado. No se ha enviado nada.")
+        return
+
+    pendientes = await _run_db(get_pendientes_promo_referido)
+    if not pendientes:
+        await query.edit_message_text("No hay usuarios pendientes de avisar.")
+        return
+
+    await query.edit_message_text(f"📣 Enviando promo de referidos a {len(pendientes)} usuarios…")
+
+    enviados = 0
+    fallidos = 0
+    for fila in pendientes:
+        uid = int(fila["telegram_user_id"])
+        try:
+            texto, markup = await _panel_referido(uid)
+            await context.bot.send_message(
+                chat_id=uid,
+                text="🎁 *¡Novedad! Gana 1 mes gratis*\n\n" + texto,
+                reply_markup=markup,
+                parse_mode="Markdown",
+            )
+            await _run_db(
+                registrar_evento, "promo_referido",
+                target_user_id=uid, actor_id=query.from_user.id, actor_tipo="admin",
+            )
+            enviados += 1
+        except Exception as e:
+            fallidos += 1
+            logger.warning("No se pudo enviar promo de referidos a %s: %s", uid, e)
+        await asyncio.sleep(0.05)  # ~20 msg/s, dentro de los límites de Telegram
+
+    await query.edit_message_text(
+        f"✅ Promo de referidos enviada.\n"
+        f"Enviados: {enviados}\nFallidos (bloquearon el bot, etc.): {fallidos}"
+    )
+    logger.info("Promo referidos: enviados=%d fallidos=%d", enviados, fallidos)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -2904,6 +3007,7 @@ _EVENT_EMOJI = {
     "cancelacion":      "🛑",
     "reembolso":        "💸",
     "referido_recompensa": "🎁",
+    "promo_referido":   "📣",
     "datos_borrados":   "🗑",
     "acceso_entregado": "🔑",
 }
@@ -4261,6 +4365,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help",          help_command))
     app.add_handler(CommandHandler("whoami",        whoami))
     app.add_handler(CommandHandler("referido",      referido_command))
+    app.add_handler(CommandHandler("promo_referidos", promo_referidos))
     app.add_handler(CommandHandler("privacidad",    privacidad_command))
     app.add_handler(CommandHandler("borrar_datos",  borrar_datos_command))
     app.add_handler(CommandHandler("aprobar",       aprobar))
@@ -4288,6 +4393,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(admin_action_callback, pattern=r"^(approve:|reject:)"))
     app.add_handler(CallbackQueryHandler(encuesta_callback, pattern=r"^enc:"))
     app.add_handler(CallbackQueryHandler(borrar_datos_callback, pattern=r"^borrar:"))
+    app.add_handler(CallbackQueryHandler(promo_referidos_callback, pattern=r"^promoref:"))
     app.add_handler(CallbackQueryHandler(seleccionar_plan))
 
     # Auto-aprobación de solicitudes de unión a los canales (enlaces con
