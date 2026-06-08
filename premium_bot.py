@@ -14,6 +14,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
+    ChatJoinRequestHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -635,40 +636,57 @@ def get_plan_channels(plan: str) -> list[tuple[str, int]]:
     return []
 
 
+async def _desbanear_de_canales(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, plan: str
+) -> None:
+    """
+    Levanta cualquier ban previo del usuario en los canales de su plan
+    (only_if_banned=True, no-op si no estaba baneado). Un usuario baneado no
+    puede ni solicitar entrada; una expulsión cuyo unban falló lo deja atascado.
+    """
+    for _, chat_id in get_plan_channels(plan):
+        try:
+            await context.bot.unban_chat_member(
+                chat_id=chat_id, user_id=user_id, only_if_banned=True
+            )
+        except Exception as e:
+            logger.warning(
+                "No se pudo desbanear preventivamente a %s en %s: %s",
+                user_id, chat_id, e,
+            )
+
+
 async def generar_enlaces_acceso(
     context: ContextTypes.DEFAULT_TYPE, plan: str, user_id: int | None = None
 ) -> list[tuple[str, str]]:
     """
     Genera enlaces de invitación frescos en el momento de la llamada.
-    Cada enlace tiene 1 uso y caduca en INVITE_EXPIRY_HOURS horas.
 
-    Si se pasa user_id, antes de crear el enlace se levanta cualquier ban
-    previo del usuario en el canal (only_if_banned=True, no-op si no estaba
-    baneado). Un usuario baneado NO puede entrar ni con un enlace válido, y
-    una expulsión cuyo unban falló deja al usuario atascado: este desbaneo
-    preventivo lo arregla al entregar el acceso.
+    Los enlaces usan `creates_join_request`: al pulsarlos, el usuario SOLICITA
+    entrar y el ChatJoinRequestHandler le aprueba al instante si tiene
+    suscripción activa que cubra el canal. Ventajas frente a member_limit=1:
+      - No se "consumen" con un intento fallido (adiós al falso 'enlace expirado').
+      - Funcionan tengan o no el canal activado 'Aprobar nuevos miembros'.
+      - Verifican la entrada real y rechazan a quien no tiene suscripción
+        (defensa contra reparto del enlace a terceros).
+
+    Si se pasa user_id, antes de crear el enlace se desbanea al usuario
+    (necesario: un usuario baneado ni siquiera puede solicitar entrada).
     """
+    if user_id is not None:
+        await _desbanear_de_canales(context, user_id, plan)
+
     canales = get_plan_channels(plan)
     enlaces = []
     for titulo, chat_id in canales:
-        if user_id is not None:
-            try:
-                await context.bot.unban_chat_member(
-                    chat_id=chat_id, user_id=user_id, only_if_banned=True
-                )
-            except Exception as e:
-                logger.warning(
-                    "No se pudo desbanear preventivamente a %s en %s: %s",
-                    user_id, chat_id, e,
-                )
         invite = await context.bot.create_chat_invite_link(
             chat_id=chat_id,
             name=f"{plan}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            member_limit=1,
+            creates_join_request=True,
             expire_date=now_utc() + timedelta(hours=INVITE_EXPIRY_HOURS),
         )
         enlaces.append((titulo, invite.invite_link))
-        logger.info(f"Enlace generado para {titulo} — caduca en {INVITE_EXPIRY_HOURS}h")
+        logger.info(f"Enlace (solicitud) generado para {titulo} — caduca en {INVITE_EXPIRY_HOURS}h")
     return enlaces
 
 
@@ -933,6 +951,30 @@ def tiene_suscripcion_activa(user_id: int) -> bool:
     if isinstance(fecha_fin, str):
         fecha_fin = parse_date(fecha_fin)
     return fecha_fin >= today_date()
+
+
+def usuario_activo_para_canal(user_id: int, chat_id: int) -> bool:
+    """
+    True si el usuario tiene suscripción activa (no caducada/cancelada) cuyo
+    plan incluye `chat_id`. Base de la auto-aprobación de solicitudes de unión.
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT plan, fecha_fin FROM users "
+                "WHERE telegram_user_id = %s AND estado = 'activo'",
+                (user_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return False
+    fecha_fin = row["fecha_fin"]
+    if isinstance(fecha_fin, str):
+        fecha_fin = parse_date(fecha_fin)
+    if fecha_fin < today_date():
+        return False
+    canales = {cid for _, cid in get_plan_channels(row["plan"])}
+    return chat_id in canales
 
 
 def start_trial(user_id: int, username: str | None, full_name: str, plan: str):
@@ -2021,27 +2063,49 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
 
     plan = acceso["plan"]
 
+    # Desbaneo preventivo SIEMPRE, antes del límite de generaciones: si una
+    # expulsión previa dejó al usuario baneado, no podría ni solicitar entrada,
+    # y la trampa era que el tope de generaciones impedía llegar a desbanearlo.
+    await _desbanear_de_canales(context, user.id, plan)
+
     # Límite de auto-generación: impide que un suscriptor genere enlaces de
     # forma indefinida para repartirlos a terceros. Se reinicia con cada
-    # aprobación/renovación/regalo (registrar_acceso_pendiente).
+    # aprobación/renovación/regalo (registrar_acceso_pendiente). Ya no es un
+    # callejón sin salida: el usuario queda desbaneado y se avisa al admin.
     if (acceso.get("generaciones") or 0) >= MAX_GENERACIONES_ACCESO:
         await query.edit_message_text(
-            "⚠️ Ya has generado varios enlaces de acceso para esta suscripción.\n"
-            "Por seguridad no puedo crear más automáticamente.\n\n"
-            "Si necesitas otro, escríbeme: @erikenobi"
+            "⚠️ Ya has generado varios enlaces para esta suscripción.\n"
+            "Si tu último enlace sigue vigente, púlsalo y *Solicitar acceso* "
+            "(te aprobaré automáticamente).\n\n"
+            "Si no te funciona, escríbeme: @erikenobi",
+            parse_mode="Markdown",
         )
         logger.warning(
             "Usuario %s alcanzó el límite de generación de enlaces (%s)",
             user.id, MAX_GENERACIONES_ACCESO,
         )
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=(
+                        f"⚠️ El usuario {user.id} no consigue entrar "
+                        f"(plan {plan}) y agotó las generaciones de enlace.\n"
+                        f"Lo he desbaneado por si acaso. Usa /link {user.id} para "
+                        "darle un enlace fresco, o añádelo al canal manualmente."
+                    ),
+                )
+            except Exception as e:
+                logger.error("Error avisando tope de enlaces al admin %s: %s", admin_id, e)
         return
 
-    # Revocar los enlaces emitidos antes (si los hubiera): solo el último set
-    # queda vivo, evitando acumular varios enlaces de 1 uso simultáneos.
+    # Revocar los enlaces emitidos antes (best-effort): así el botón siempre
+    # entrega el enlace más reciente.
     await _revocar_enlaces(context, acceso.get("ultimos_enlaces"))
 
     try:
-        enlaces = await generar_enlaces_acceso(context, plan, user_id=user.id)
+        # El desbaneo ya se hizo arriba, no hace falta repetirlo en generar.
+        enlaces = await generar_enlaces_acceso(context, plan)
     except Exception as e:
         logger.error(f"Error generando enlaces para {user.id}: {e}")
         await query.edit_message_text(
@@ -2067,14 +2131,15 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
     texto = (
         "✅ *Acceso activado*\n\n"
         f"Plan: *{plan.upper()}*\n\n"
-        "Aquí tienes tu enlace de acceso (válido durante 1 hora):\n\n"
+        "Pulsa tu enlace y luego *Solicitar acceso* — te aprobaré "
+        "automáticamente al instante:\n\n"
     )
     for titulo, link in enlaces:
         texto += f"{titulo}\n{link}\n\n"
 
     texto += (
-        "⚠️ El enlace es de un solo uso y caduca en 1 hora.\n"
-        "Si caduca antes de usarlo, pulsa el botón de abajo para generar uno nuevo."
+        "⏱ El enlace caduca en 1 hora. Si caduca, pulsa el botón de abajo "
+        "para generar otro."
     )
 
     # No borramos pending_access: así el usuario puede regenerar el enlace
@@ -2088,6 +2153,58 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
         ),
     )
     logger.info(f"Acceso entregado a usuario {user.id} para plan {plan}")
+
+
+async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Auto-aprueba las solicitudes de unión a los canales: aprueba si el usuario
+    tiene suscripción activa que cubra el canal, y rechaza en caso contrario
+    (defensa contra reparto del enlace). Verifica la entrada real del usuario.
+    """
+    req = update.chat_join_request
+    if req is None:
+        return
+    user_id = req.from_user.id
+    chat_id = req.chat.id
+
+    try:
+        permitido = usuario_activo_para_canal(user_id, chat_id)
+    except Exception as e:
+        logger.error("Error comprobando suscripción de %s para %s: %s", user_id, chat_id, e)
+        permitido = False
+
+    if permitido:
+        try:
+            await context.bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
+            logger.info("Solicitud de unión APROBADA: user %s | canal %s", user_id, chat_id)
+        except Exception as e:
+            logger.error("Error aprobando solicitud de %s en %s: %s", user_id, chat_id, e)
+    else:
+        try:
+            await context.bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
+            logger.info(
+                "Solicitud de unión RECHAZADA (sin suscripción activa): user %s | canal %s",
+                user_id, chat_id,
+            )
+        except Exception as e:
+            logger.error("Error rechazando solicitud de %s en %s: %s", user_id, chat_id, e)
+        # Avisar al admin: puede ser alguien con el enlace compartido o un pago
+        # pendiente de validar.
+        for admin_id in ADMIN_IDS:
+            try:
+                username = f"@{req.from_user.username}" if req.from_user.username else "(sin username)"
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=(
+                        "🚷 Solicitud de acceso rechazada (sin suscripción activa)\n\n"
+                        f"Usuario: {req.from_user.full_name}\n"
+                        f"Username: {username}\n"
+                        f"User ID: {user_id}\n"
+                        f"Canal: {chat_id}"
+                    ),
+                )
+            except Exception as e:
+                logger.error("Error avisando solicitud rechazada al admin %s: %s", admin_id, e)
 
 
 async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3730,6 +3847,10 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(encuesta_callback, pattern=r"^enc:"))
     app.add_handler(CallbackQueryHandler(seleccionar_plan))
 
+    # Auto-aprobación de solicitudes de unión a los canales (enlaces con
+    # creates_join_request). Aprueba a suscriptores activos, rechaza al resto.
+    app.add_handler(ChatJoinRequestHandler(on_join_request))
+
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE
@@ -3758,7 +3879,12 @@ def main() -> None:
     )
     # No descartamos los updates acumulados durante una caída/redeploy: así no
     # se pierden comprobantes ni mensajes enviados mientras el bot estaba abajo.
-    app.run_polling(drop_pending_updates=False)
+    # allowed_updates explícito para garantizar la recepción de las solicitudes
+    # de unión (chat_join_request), necesarias para la auto-aprobación.
+    app.run_polling(
+        drop_pending_updates=False,
+        allowed_updates=Update.ALL_TYPES,
+    )
 
 
 if __name__ == "__main__":
