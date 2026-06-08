@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -149,7 +150,9 @@ def init_pool() -> None:
     _pool = ConnectionPool(
         conninfo=DATABASE_URL,
         min_size=1,
-        max_size=5,
+        # Holgado para que varias consultas offloaded a hilos (ver _run_db)
+        # puedan ejecutarse en paralelo sin esperar a una conexión libre.
+        max_size=10,
         kwargs={"row_factory": dict_row},
     )
     _pool.wait()
@@ -162,6 +165,16 @@ def get_conn():
     if not DATABASE_URL:
         raise ValueError("Falta DATABASE_URL en variables de entorno.")
     return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+
+
+async def _run_db(func, *args, **kwargs):
+    """
+    Ejecuta una función de DB SÍNCRONA en un hilo aparte para no bloquear el
+    event loop de asyncio mientras espera a Postgres. El pool de psycopg es
+    thread-safe, así que es seguro obtener conexiones desde estos hilos.
+    Uso: `fila = await _run_db(get_pending_payment, user_id)`.
+    """
+    return await asyncio.to_thread(func, *args, **kwargs)
 
 
 def init_db():
@@ -793,6 +806,28 @@ def borrar_acceso_pendiente(user_id: int) -> None:
 # ==============================
 # DB — PENDING PAYMENTS
 # ==============================
+
+def upsert_pending_payment(user_id: int, username: str | None, full_name: str, plan: str) -> None:
+    """Registra/actualiza el pago pendiente cuando el usuario elige un plan."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO pending_payments (telegram_user_id, username, full_name, plan, created_at)
+                    VALUES (%s, %s, %s, %s, NOW())
+                    ON CONFLICT (telegram_user_id)
+                    DO UPDATE SET
+                        username   = EXCLUDED.username,
+                        full_name  = EXCLUDED.full_name,
+                        plan       = EXCLUDED.plan,
+                        created_at = NOW();
+                    """,
+                    (user_id, username, full_name, plan),
+                )
+    except Exception as e:
+        logger.error("Error guardando pago pendiente para %s: %s", user_id, e)
+
 
 def get_pending_payment(user_id: int):
     with get_conn() as conn:
@@ -1465,7 +1500,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if user:
-        if registrar_visitante(user.id, user.username, user.full_name):
+        if await _run_db(registrar_visitante, user.id, user.username, user.full_name):
             username_admin = f"@{user.username}" if user.username else "(sin username)"
             texto_admin = (
                 "👤 Nuevo usuario en el bot\n\n"
@@ -1479,7 +1514,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception as e:
                     logger.error(f"Error avisando nuevo usuario al admin {admin_id}: {e}")
 
-        acceso = get_acceso_pendiente(user.id)
+        acceso = await _run_db(get_acceso_pendiente, user.id)
         if acceso:
             await update.message.reply_text(
                 "🎉 Tienes un acceso aprobado pendiente de recoger.\n"
@@ -1536,24 +1571,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Registrar en pendientes cuando el usuario elige un plan de pago
     if plan in ("goles", "corners", "combo", "pre"):
-        try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO pending_payments (telegram_user_id, username, full_name, plan, created_at)
-                        VALUES (%s, %s, %s, %s, NOW())
-                        ON CONFLICT (telegram_user_id)
-                        DO UPDATE SET
-                            username   = EXCLUDED.username,
-                            full_name  = EXCLUDED.full_name,
-                            plan       = EXCLUDED.plan,
-                            created_at = NOW();
-                        """,
-                        (user.id, user.username, user.full_name, plan),
-                    )
-        except Exception as e:
-            logger.error("Error guardando pago pendiente para %s: %s", user.id, e)
+        await _run_db(upsert_pending_payment, user.id, user.username, user.full_name, plan)
 
     if plan == "menu":
         await query.edit_message_text(
@@ -1616,7 +1634,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # ── Stats reales ────────────────────────────────────────────────────
     if plan == "stats":
-        stats = get_stats_reales()
+        stats = await _run_db(get_stats_reales)
 
         if stats and (stats.get("globales") or stats.get("ultimo_mes")):
             texto = _formatear_stats_reales(stats)
@@ -1669,7 +1687,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # ── Plan GOLES ──────────────────────────────────────────────────────
     if plan == "goles":
-        stats       = get_stats_reales()
+        stats       = await _run_db(get_stats_reales)
         strike_real = _get_strike_tipo(stats, "gol")
         strike_txt  = f"*{strike_real}* \\(último mes\\)" if strike_real else "*\\+70% estimado*"
 
@@ -1690,7 +1708,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # ── Plan CORNERS ────────────────────────────────────────────────────
     if plan == "corners":
-        stats       = get_stats_reales()
+        stats       = await _run_db(get_stats_reales)
         strike_real = _get_strike_tipo(stats, "corner")
         strike_txt  = f"*{strike_real}* \\(último mes\\)" if strike_real else "*\\+80% estimado*"
 
@@ -1728,7 +1746,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # ── Plan COMBO ──────────────────────────────────────────────────────
     if plan == "combo":
-        stats         = get_stats_reales()
+        stats         = await _run_db(get_stats_reales)
         strike_goles  = _get_strike_tipo(stats, "gol")
         strike_corner = _get_strike_tipo(stats, "corner")
 
@@ -1771,7 +1789,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        if has_used_trial(user.id):
+        if await _run_db(has_used_trial, user.id):
             await query.edit_message_text(
                 "🎁 *Prueba gratuita ya usada*\n\n"
                 "Solo se permite una prueba de 3 días por usuario y ya has reclamado la tuya\\.\n\n"
@@ -1781,7 +1799,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        if tiene_suscripcion_activa(user.id):
+        if await _run_db(tiene_suscripcion_activa, user.id):
             await query.edit_message_text(
                 "Ya tienes una suscripción activa, así que no necesitas la prueba 🙌\n\n"
                 "Si quieres cambiar de plan, escríbeme: @erikenobi",
@@ -1790,11 +1808,8 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
 
         try:
-            record = start_trial(
-                user_id=user.id,
-                username=user.username,
-                full_name=user.full_name,
-                plan=plan_real,
+            record = await _run_db(
+                start_trial, user.id, user.username, user.full_name, plan_real
             )
         except Exception as e:
             logger.error("Error iniciando trial para %s: %s", user.id, e)
@@ -1804,10 +1819,11 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        registrar_acceso_pendiente(user.id, plan_real)
-        delete_pending_payment(user.id)
-        registrar_evento(
-            "trial", target_user_id=user.id, actor_id=user.id,
+        await _run_db(registrar_acceso_pendiente, user.id, plan_real)
+        await _run_db(delete_pending_payment, user.id)
+        await _run_db(
+            registrar_evento, "trial",
+            target_user_id=user.id, actor_id=user.id,
             actor_tipo="user", plan=plan_real, fecha_fin=record["fecha_fin"],
         )
 
@@ -1949,7 +1965,7 @@ async def enviar_encuesta_inicial(
     Envía el mensaje inicial de la encuesta al usuario si no se le había
     enviado ya. Devuelve True si se envió.
     """
-    if not crear_encuesta(user_id, plan):
+    if not await _run_db(crear_encuesta, user_id, plan):
         return False
 
     saludo = f"👋 Hola {nombre}" if nombre else "👋 Hola"
@@ -1980,7 +1996,7 @@ async def encuesta_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     user = query.from_user
 
     if data == "enc:no":
-        marcar_encuesta_rechazada(user.id)
+        await _run_db(marcar_encuesta_rechazada, user.id)
         await query.edit_message_text(
             "Entendido. ¡Gracias igualmente! 🙏\n"
             "Si en algún momento quieres volver, escribe /start."
@@ -2000,7 +2016,7 @@ async def encuesta_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if razon not in RAZONES_ENCUESTA:
             await query.edit_message_text("Opción no válida.")
             return
-        guardar_razon_encuesta(user.id, razon)
+        await _run_db(guardar_razon_encuesta, user.id, razon)
         await query.edit_message_text(
             "*2/2 — ¿Cómo valoras el servicio en general?*",
             reply_markup=_encuesta_valoracion_markup(),
@@ -2017,7 +2033,7 @@ async def encuesta_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if valoracion < 1 or valoracion > 5:
             await query.edit_message_text("Valoración fuera de rango.")
             return
-        guardar_valoracion_encuesta(user.id, valoracion)
+        await _run_db(guardar_valoracion_encuesta, user.id, valoracion)
         await query.edit_message_text(
             "¡Gracias! Última cosa (opcional):\n\n"
             "Si tienes alguna *sugerencia o mejora*, escríbela aquí en este chat. "
@@ -2028,7 +2044,7 @@ async def encuesta_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if data == "enc:skip":
-        cerrar_encuesta_sin_sugerencia(user.id)
+        await _run_db(cerrar_encuesta_sin_sugerencia, user.id)
         await query.edit_message_text(
             "¡Gracias por tu feedback! 🙏\n"
             "Si en algún momento quieres volver, escribe /start."
@@ -2053,7 +2069,7 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
-    acceso = get_acceso_pendiente(user.id)
+    acceso = await _run_db(get_acceso_pendiente, user.id)
 
     if not acceso:
         await query.edit_message_text(
@@ -2121,9 +2137,10 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
         [chat_id, link]
         for (_, chat_id), (_, link) in zip(canales, enlaces)
     ]
-    guardar_enlaces_generados(user.id, enlaces_con_chat)
-    registrar_evento(
-        "acceso_entregado", target_user_id=user.id, actor_id=user.id,
+    await _run_db(guardar_enlaces_generados, user.id, enlaces_con_chat)
+    await _run_db(
+        registrar_evento, "acceso_entregado",
+        target_user_id=user.id, actor_id=user.id,
         actor_tipo="user", plan=plan,
         detalle=f"generacion={(acceso.get('generaciones') or 0) + 1}",
     )
@@ -2168,7 +2185,7 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = req.chat.id
 
     try:
-        permitido = usuario_activo_para_canal(user_id, chat_id)
+        permitido = await _run_db(usuario_activo_para_canal, user_id, chat_id)
     except Exception as e:
         logger.error("Error comprobando suscripción de %s para %s: %s", user_id, chat_id, e)
         permitido = False
@@ -2221,11 +2238,11 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
     # y manda un mensaje de texto, lo guardamos como sugerencia y avisamos
     # al admin. Las fotos/documentos siguen el flujo normal de comprobantes.
     if message.text:
-        encuesta = get_encuesta(user.id)
+        encuesta = await _run_db(get_encuesta, user.id)
         if encuesta and encuesta.get("awaiting_sugerencia"):
             sugerencia = (message.text or "").strip()
             if sugerencia:
-                guardar_sugerencia_encuesta(user.id, sugerencia[:1000])
+                await _run_db(guardar_sugerencia_encuesta, user.id, sugerencia[:1000])
                 await message.reply_text(
                     "¡Gracias por tu feedback! 🙏\n"
                     "Si en algún momento quieres volver, escribe /start."
@@ -2247,7 +2264,7 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
                         logger.error("Error reenviando sugerencia al admin %s: %s", admin_id, e)
                 return
 
-    pending = get_pending_payment(user.id)
+    pending = await _run_db(get_pending_payment, user.id)
 
     if not pending:
         await message.reply_text(
@@ -2324,7 +2341,7 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             # + auditar en una transacción. Idempotente: un segundo clic (o el
             # botón de otra captura) recibe None y no vuelve a extender. Si la
             # transacción falla, no se aplica nada (el pago sigue pendiente).
-            result = aprobar_pago_tx(user_id_int, plan, actor_id=admin.id, via="botón")
+            result = await _run_db(aprobar_pago_tx, user_id_int, plan, actor_id=admin.id, via="botón")
             if result is None:
                 await query.edit_message_text(
                     f"⚠️ El usuario {user_id_int} ya no está en pendientes "
@@ -2378,10 +2395,10 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception as e:
                 logger.error(f"Error avisando rechazo a {user_id_int}: {e}")
 
-            delete_pending_payment(user_id_int)
-            registrar_evento(
-                "rechazo", target_user_id=user_id_int, actor_id=admin.id,
-                actor_tipo="admin",
+            await _run_db(delete_pending_payment, user_id_int)
+            await _run_db(
+                registrar_evento, "rechazo",
+                target_user_id=user_id_int, actor_id=admin.id, actor_tipo="admin",
             )
             await query.edit_message_text(f"❌ Usuario {user_id_int} rechazado.")
             logger.info(f"Pago rechazado: user {user_id_int}")
@@ -2423,7 +2440,8 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Aprobación ATÓMICA e idempotente (ver aprobar_pago_tx). Una segunda
     # ejecución de /aprobar para el mismo usuario no vuelve a extender.
     try:
-        result = aprobar_pago_tx(
+        result = await _run_db(
+            aprobar_pago_tx,
             target_user_id, plan, actor_id=update.effective_user.id, via="/aprobar"
         )
     except Exception as e:
@@ -2485,9 +2503,10 @@ async def rechazar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error(f"Error avisando rechazo a {target_user_id}: {e}")
 
-    delete_pending_payment(target_user_id)
-    registrar_evento(
-        "rechazo", target_user_id=target_user_id,
+    await _run_db(delete_pending_payment, target_user_id)
+    await _run_db(
+        registrar_evento, "rechazo",
+        target_user_id=target_user_id,
         actor_id=update.effective_user.id, actor_tipo="admin",
         detalle="via /rechazar",
     )
@@ -2509,17 +2528,20 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("El user_id no es válido.")
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT telegram_user_id, plan, fecha_inicio, fecha_fin, estado,
-                       acceso_revocado, motivo_baja
-                FROM users WHERE telegram_user_id = %s
-                """,
-                (user_id,),
-            )
-            record = cur.fetchone()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT telegram_user_id, plan, fecha_inicio, fecha_fin, estado,
+                           acceso_revocado, motivo_baja
+                    FROM users WHERE telegram_user_id = %s
+                    """,
+                    (user_id,),
+                )
+                return cur.fetchone()
+
+    record = await _run_db(_q)
 
     if not record:
         await update.message.reply_text("Ese usuario no tiene suscripción registrada.")
@@ -2588,20 +2610,23 @@ async def historial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("El user_id no es válido.")
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT created_at, event, actor_id, actor_tipo, target_user_id,
-                       plan, fecha_fin, detalle
-                FROM audit_log
-                WHERE target_user_id = %s
-                ORDER BY created_at DESC
-                LIMIT 50
-                """,
-                (target_user_id,),
-            )
-            rows = cur.fetchall()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT created_at, event, actor_id, actor_tipo, target_user_id,
+                           plan, fecha_fin, detalle
+                    FROM audit_log
+                    WHERE target_user_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT 50
+                    """,
+                    (target_user_id,),
+                )
+                return cur.fetchall()
+
+    rows = await _run_db(_q)
 
     if not rows:
         await update.message.reply_text(
@@ -2628,19 +2653,22 @@ async def auditoria(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except ValueError:
             pass
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT created_at, event, actor_id, actor_tipo, target_user_id,
-                       plan, fecha_fin, detalle
-                FROM audit_log
-                ORDER BY created_at DESC
-                LIMIT %s
-                """,
-                (limite,),
-            )
-            rows = cur.fetchall()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT created_at, event, actor_id, actor_tipo, target_user_id,
+                           plan, fecha_fin, detalle
+                    FROM audit_log
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (limite,),
+                )
+                return cur.fetchall()
+
+    rows = await _run_db(_q)
 
     if not rows:
         await update.message.reply_text("No hay eventos de auditoría registrados.")
@@ -2672,15 +2700,18 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("No tienes permisos para usar este comando.")
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT telegram_user_id, full_name, username, plan, estado, fecha_fin
-                FROM users ORDER BY fecha_fin ASC
-                """
-            )
-            rows = cur.fetchall()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT telegram_user_id, full_name, username, plan, estado, fecha_fin
+                    FROM users ORDER BY fecha_fin ASC
+                    """
+                )
+                return cur.fetchall()
+
+    rows = await _run_db(_q)
 
     if not rows:
         await update.message.reply_text("No hay usuarios guardados.")
@@ -2702,15 +2733,18 @@ async def pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("No tienes permisos.")
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT telegram_user_id, username, full_name, plan, created_at
-                FROM pending_payments ORDER BY created_at DESC
-                """
-            )
-            rows = cur.fetchall()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT telegram_user_id, username, full_name, plan, created_at
+                    FROM pending_payments ORDER BY created_at DESC
+                    """
+                )
+                return cur.fetchall()
+
+    rows = await _run_db(_q)
 
     if not rows:
         await update.message.reply_text("No hay pagos pendientes.")
@@ -2732,19 +2766,22 @@ async def caducan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     today = today_date()
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT telegram_user_id, plan, fecha_fin
-                FROM users
-                WHERE estado = 'activo'
-                  AND fecha_fin <= %s
-                ORDER BY fecha_fin ASC
-                """,
-                (today + timedelta(days=7),),
-            )
-            rows = cur.fetchall()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT telegram_user_id, plan, fecha_fin
+                    FROM users
+                    WHERE estado = 'activo'
+                      AND fecha_fin <= %s
+                    ORDER BY fecha_fin ASC
+                    """,
+                    (today + timedelta(days=7),),
+                )
+                return cur.fetchall()
+
+    rows = await _run_db(_q)
 
     if not rows:
         await update.message.reply_text("No hay caducidades en los próximos 7 días.")
@@ -2767,16 +2804,19 @@ async def activos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("No tienes permisos.")
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT telegram_user_id, plan, fecha_fin
-                FROM users WHERE estado = 'activo'
-                ORDER BY fecha_fin ASC
-                """
-            )
-            rows = cur.fetchall()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT telegram_user_id, plan, fecha_fin
+                    FROM users WHERE estado = 'activo'
+                    ORDER BY fecha_fin ASC
+                    """
+                )
+                return cur.fetchall()
+
+    rows = await _run_db(_q)
 
     if not rows:
         await update.message.reply_text("No hay usuarios activos.")
@@ -2794,19 +2834,22 @@ async def trials_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("No tienes permisos.")
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT t.telegram_user_id, t.plan AS plan_trial, t.used_at,
-                       u.fecha_inicio, u.fecha_fin, u.estado, u.plan AS plan_actual,
-                       u.full_name, u.username
-                FROM trials t
-                LEFT JOIN users u ON u.telegram_user_id = t.telegram_user_id
-                ORDER BY t.used_at DESC
-                """
-            )
-            rows = cur.fetchall()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT t.telegram_user_id, t.plan AS plan_trial, t.used_at,
+                           u.fecha_inicio, u.fecha_fin, u.estado, u.plan AS plan_actual,
+                           u.full_name, u.username
+                    FROM trials t
+                    LEFT JOIN users u ON u.telegram_user_id = t.telegram_user_id
+                    ORDER BY t.used_at DESC
+                    """
+                )
+                return cur.fetchall()
+
+    rows = await _run_db(_q)
 
     if not rows:
         await update.message.reply_text("No hay trials registrados.")
@@ -2871,18 +2914,21 @@ async def encuestas_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("No tienes permisos.")
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT e.telegram_user_id, e.plan, e.sent_at, e.razon, e.valoracion,
-                       e.sugerencia, e.responded_at, u.full_name, u.username
-                FROM encuestas e
-                LEFT JOIN users u ON u.telegram_user_id = e.telegram_user_id
-                ORDER BY e.sent_at DESC
-                """
-            )
-            rows = cur.fetchall()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT e.telegram_user_id, e.plan, e.sent_at, e.razon, e.valoracion,
+                           e.sugerencia, e.responded_at, u.full_name, u.username
+                    FROM encuestas e
+                    LEFT JOIN users u ON u.telegram_user_id = e.telegram_user_id
+                    ORDER BY e.sent_at DESC
+                    """
+                )
+                return cur.fetchall()
+
+    rows = await _run_db(_q)
 
     if not rows:
         await update.message.reply_text("Aún no se ha enviado ninguna encuesta.")
@@ -2938,19 +2984,22 @@ async def encuesta_pendientes(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("No tienes permisos.")
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT u.telegram_user_id, u.plan, u.full_name
-                FROM users u
-                LEFT JOIN encuestas e ON e.telegram_user_id = u.telegram_user_id
-                WHERE u.estado = 'caducado'
-                  AND e.telegram_user_id IS NULL
-                ORDER BY u.fecha_fin ASC
-                """
-            )
-            rows = cur.fetchall()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT u.telegram_user_id, u.plan, u.full_name
+                    FROM users u
+                    LEFT JOIN encuestas e ON e.telegram_user_id = u.telegram_user_id
+                    WHERE u.estado = 'caducado'
+                      AND e.telegram_user_id IS NULL
+                    ORDER BY u.fecha_fin ASC
+                    """
+                )
+                return cur.fetchall()
+
+    rows = await _run_db(_q)
 
     if not rows:
         await update.message.reply_text("No hay caducados sin encuesta pendiente.")
@@ -2995,13 +3044,16 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Buscar plan actual si no se especifica uno nuevo
     plan_nuevo = context.args[1].lower() if len(context.args) >= 2 else None
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT username, full_name, plan FROM users WHERE telegram_user_id = %s",
-                (target_user_id,),
-            )
-            existing = cur.fetchone()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT username, full_name, plan FROM users WHERE telegram_user_id = %s",
+                    (target_user_id,),
+                )
+                return cur.fetchone()
+
+    existing = await _run_db(_q)
 
     if not existing and not plan_nuevo:
         await update.message.reply_text(
@@ -3021,7 +3073,8 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Renovación ATÓMICA: extender + registrar acceso + auditar en una
     # transacción. Si falla, no se aplica nada.
     try:
-        record, plan_anterior = renovar_tx(
+        record, plan_anterior = await _run_db(
+            renovar_tx,
             target_user_id, plan, username, full_name,
             actor_id=update.effective_user.id,
         )
@@ -3096,13 +3149,16 @@ async def link_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("El user_id no es válido.")
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT plan, estado, fecha_fin FROM users WHERE telegram_user_id = %s",
-                (target_user_id,),
-            )
-            row = cur.fetchone()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT plan, estado, fecha_fin FROM users WHERE telegram_user_id = %s",
+                    (target_user_id,),
+                )
+                return cur.fetchone()
+
+    row = await _run_db(_q)
 
     if not row:
         await update.message.reply_text(
@@ -3186,13 +3242,16 @@ async def regalar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Días debe estar entre 1 y 365.")
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT username, full_name, plan FROM users WHERE telegram_user_id = %s",
-                (target_user_id,),
-            )
-            existing = cur.fetchone()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT username, full_name, plan FROM users WHERE telegram_user_id = %s",
+                    (target_user_id,),
+                )
+                return cur.fetchone()
+
+    existing = await _run_db(_q)
 
     username  = existing["username"] if existing else None
     full_name = existing["full_name"] if existing else f"Usuario {target_user_id}"
@@ -3200,7 +3259,8 @@ async def regalar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Regalo ATÓMICO: asignar (set) + registrar acceso + auditar en una
     # transacción. Si falla, no se aplica nada.
     try:
-        record, plan_anterior = regalar_tx(
+        record, plan_anterior = await _run_db(
+            regalar_tx,
             target_user_id, plan, days, username, full_name,
             actor_id=update.effective_user.id,
         )
@@ -3267,31 +3327,38 @@ async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("El user_id no es válido.")
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT plan FROM users WHERE telegram_user_id = %s",
-                (target_user_id,),
-            )
-            record = cur.fetchone()
+    def _q_plan():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT plan FROM users WHERE telegram_user_id = %s",
+                    (target_user_id,),
+                )
+                return cur.fetchone()
+
+    record = await _run_db(_q_plan)
 
     if not record:
         await update.message.reply_text("Ese usuario no está registrado.")
         return
 
     ok = await expulsar_de_canales(context, target_user_id, record["plan"])
-    borrar_acceso_pendiente(target_user_id)
+    await _run_db(borrar_acceso_pendiente, target_user_id)
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE users SET estado = 'caducado', acceso_revocado = %s, "
-                "updated_at = NOW() WHERE telegram_user_id = %s",
-                (ok, target_user_id),
-            )
+    def _q_upd():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET estado = 'caducado', acceso_revocado = %s, "
+                    "updated_at = NOW() WHERE telegram_user_id = %s",
+                    (ok, target_user_id),
+                )
 
-    registrar_evento(
-        "expulsion_manual", target_user_id=target_user_id,
+    await _run_db(_q_upd)
+
+    await _run_db(
+        registrar_evento, "expulsion_manual",
+        target_user_id=target_user_id,
         actor_id=update.effective_user.id, actor_tipo="admin",
         plan=record["plan"], detalle=f"ban_ok={ok}",
     )
@@ -3379,31 +3446,38 @@ async def _baja_usuario(
 
     motivo = " ".join(context.args[1:]).strip() or None
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT plan, estado FROM users WHERE telegram_user_id = %s",
-                (target_user_id,),
-            )
-            record = cur.fetchone()
+    def _q_rec():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT plan, estado FROM users WHERE telegram_user_id = %s",
+                    (target_user_id,),
+                )
+                return cur.fetchone()
+
+    record = await _run_db(_q_rec)
 
     if not record:
         await update.message.reply_text("Ese usuario no está registrado.")
         return
 
     ok = await expulsar_de_canales(context, target_user_id, record["plan"])
-    borrar_acceso_pendiente(target_user_id)
+    await _run_db(borrar_acceso_pendiente, target_user_id)
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE users SET estado = %s, motivo_baja = %s, acceso_revocado = %s, "
-                "updated_at = NOW() WHERE telegram_user_id = %s",
-                (estado_nuevo, motivo, ok, target_user_id),
-            )
+    def _q_upd():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET estado = %s, motivo_baja = %s, acceso_revocado = %s, "
+                    "updated_at = NOW() WHERE telegram_user_id = %s",
+                    (estado_nuevo, motivo, ok, target_user_id),
+                )
 
-    registrar_evento(
-        evento, target_user_id=target_user_id,
+    await _run_db(_q_upd)
+
+    await _run_db(
+        registrar_evento, evento,
+        target_user_id=target_user_id,
         actor_id=update.effective_user.id, actor_tipo="admin",
         plan=record["plan"],
         detalle=(motivo or "") + (f" | ban_ok={ok}" if not ok else ""),
@@ -3445,17 +3519,20 @@ async def reexpulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("No tienes permisos.")
         return
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT telegram_user_id, plan, full_name, username, fecha_fin, estado
-                FROM users
-                WHERE estado <> 'activo' AND acceso_revocado = FALSE
-                ORDER BY fecha_fin ASC
-                """
-            )
-            rows = cur.fetchall()
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT telegram_user_id, plan, full_name, username, fecha_fin, estado
+                    FROM users
+                    WHERE estado <> 'activo' AND acceso_revocado = FALSE
+                    ORDER BY fecha_fin ASC
+                    """
+                )
+                return cur.fetchall()
+
+    rows = await _run_db(_q)
 
     if not rows:
         await update.message.reply_text("No hay usuarios dados de baja pendientes de expulsar.")
@@ -3474,7 +3551,7 @@ async def reexpulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             ok = False
         if ok:
             ok_count += 1
-            marcar_acceso_revocado(int(user_id), True)
+            await _run_db(marcar_acceso_revocado, int(user_id), True)
         marca = "✅" if ok else "❌"
         lineas.append(f"{marca} {user_id} | {nombre} | {plan} | {row['estado']} | fin {row['fecha_fin']}")
 
@@ -3529,18 +3606,21 @@ def _instrucciones_renovacion(plan: str) -> str:
 async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
     today = today_date()
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT telegram_user_id, plan, fecha_inicio, fecha_fin, estado
-                FROM users
-                WHERE estado = 'activo'
-                  AND fecha_fin <= %s
-                """,
-                (today + timedelta(days=3),),
-            )
-            rows = cur.fetchall()
+    def _q_proximas():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT telegram_user_id, plan, fecha_inicio, fecha_fin, estado
+                    FROM users
+                    WHERE estado = 'activo'
+                      AND fecha_fin <= %s
+                    """,
+                    (today + timedelta(days=3),),
+                )
+                return cur.fetchall()
+
+    rows = await _run_db(_q_proximas)
 
     for record in rows:
         try:
@@ -3557,7 +3637,7 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
             fecha_str  = str(end_date)
             plan_upper = record["plan"].upper()
             renovar    = _instrucciones_renovacion(record["plan"])
-            es_trial   = es_trial_actual(user_id, record["fecha_inicio"], end_date)
+            es_trial   = await _run_db(es_trial_actual, user_id, record["fecha_inicio"], end_date)
 
             # Para usuarios en trial saltamos el aviso de 3 días: lo activan
             # y lo recibirían inmediatamente, lo que es ruido innecesario.
@@ -3643,15 +3723,18 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
 
             elif days_left < 0:
                 expulsado_ok = await expulsar_de_canales(context, int(user_id), record["plan"])
-                borrar_acceso_pendiente(user_id)
+                await _run_db(borrar_acceso_pendiente, user_id)
 
-                with get_conn() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "UPDATE users SET estado = 'caducado', acceso_revocado = %s, "
-                            "updated_at = NOW() WHERE telegram_user_id = %s",
-                            (expulsado_ok, user_id),
-                        )
+                def _q_caducar():
+                    with get_conn() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE users SET estado = 'caducado', acceso_revocado = %s, "
+                                "updated_at = NOW() WHERE telegram_user_id = %s",
+                                (expulsado_ok, user_id),
+                            )
+
+                await _run_db(_q_caducar)
 
                 if es_trial:
                     texto = (
@@ -3676,8 +3759,9 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     "Suscripción caducada y usuario expulsado: %s (trial=%s, ban_ok=%s)",
                     user_id, es_trial, expulsado_ok,
                 )
-                registrar_evento(
-                    "caducidad", target_user_id=int(user_id), actor_tipo="sistema",
+                await _run_db(
+                    registrar_evento, "caducidad",
+                    target_user_id=int(user_id), actor_tipo="sistema",
                     plan=record["plan"], fecha_fin=end_date,
                     detalle=f"trial={es_trial} ban_ok={expulsado_ok}",
                 )
@@ -3709,26 +3793,29 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
     # a los ya expulsados; la recencia por updated_at (REEXPULSION_RETRY_DAYS)
     # evita re-escanear el histórico antiguo y cubre las bajas anticipadas
     # (cancelaciones antes de fecha_fin).
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT telegram_user_id, plan
-                FROM users
-                WHERE estado <> 'activo'
-                  AND acceso_revocado = FALSE
-                  AND updated_at >= NOW() - (%s * INTERVAL '1 day')
-                """,
-                (REEXPULSION_RETRY_DAYS,),
-            )
-            pendientes = cur.fetchall()
+    def _q_pendientes():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT telegram_user_id, plan
+                    FROM users
+                    WHERE estado <> 'activo'
+                      AND acceso_revocado = FALSE
+                      AND updated_at >= NOW() - (%s * INTERVAL '1 day')
+                    """,
+                    (REEXPULSION_RETRY_DAYS,),
+                )
+                return cur.fetchall()
+
+    pendientes = await _run_db(_q_pendientes)
 
     for record in pendientes:
         try:
             user_id = record["telegram_user_id"]
             ok = await expulsar_de_canales(context, int(user_id), record["plan"])
             if ok:
-                marcar_acceso_revocado(int(user_id), True)
+                await _run_db(marcar_acceso_revocado, int(user_id), True)
                 logger.info("Reintento de expulsión exitoso: %s (%s)", user_id, record["plan"])
         except Exception as e:
             logger.error(
@@ -3740,20 +3827,24 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
     # que caducaron hace al menos ENCUESTA_DELAY_DAYS días y aún no
     # la han recibido.
     delay_days = 3
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT u.telegram_user_id, u.plan, u.full_name
-                FROM users u
-                LEFT JOIN encuestas e ON e.telegram_user_id = u.telegram_user_id
-                WHERE u.estado = 'caducado'
-                  AND u.fecha_fin <= %s
-                  AND e.telegram_user_id IS NULL
-                """,
-                (today - timedelta(days=delay_days),),
-            )
-            candidatos = cur.fetchall()
+
+    def _q_candidatos():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT u.telegram_user_id, u.plan, u.full_name
+                    FROM users u
+                    LEFT JOIN encuestas e ON e.telegram_user_id = u.telegram_user_id
+                    WHERE u.estado = 'caducado'
+                      AND u.fecha_fin <= %s
+                      AND e.telegram_user_id IS NULL
+                    """,
+                    (today - timedelta(days=delay_days),),
+                )
+                return cur.fetchall()
+
+    candidatos = await _run_db(_q_candidatos)
 
     for c in candidatos:
         try:
@@ -3779,13 +3870,16 @@ async def limpiar_pending_payments_antiguos(context: ContextTypes.DEFAULT_TYPE) 
     Evita que usuarios que abrieron el bot pero nunca pagaron acumulen
     registros huérfanos indefinidamente.
     """
-    try:
+    def _q():
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM pending_payments WHERE created_at < NOW() - INTERVAL '7 days'"
                 )
-                borrados = cur.rowcount
+                return cur.rowcount
+
+    try:
+        borrados = await _run_db(_q)
         if borrados:
             logger.info("Limpieza pending_payments: %d registros huérfanos eliminados.", borrados)
     except Exception as e:
