@@ -6,6 +6,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from time import monotonic
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -87,6 +88,16 @@ STRIPE_PRE     = "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
 PLAN_DAYS    = 30
 TRIAL_DAYS   = 3
 INVITE_EXPIRY_HOURS = 1
+
+# Referidos: el referidor gana REFERIDOR_DIAS gratis y el recomendado recibe
+# 2x1 (REFERIDO_MULTIPLICADOR × los días normales) en su primer pago.
+REFERIDOR_DIAS = 30
+REFERIDO_MULTIPLICADOR = 2
+
+# Username del bot (sin @), para construir los enlaces de referido. Se rellena
+# al arrancar (post_init) con get_me(); también puede fijarse por entorno.
+BOT_USERNAME = os.getenv("BOT_USERNAME")
+
 # Cada hora: reduce a ≤1h la ventana de acceso residual de un usuario ya
 # caducado (antes 12h). La expulsión es idempotente y, gracias al flag
 # acceso_revocado, no se re-banean usuarios ya expulsados con éxito.
@@ -309,6 +320,26 @@ def init_db():
                 """
                 CREATE INDEX IF NOT EXISTS idx_audit_event
                 ON audit_log (event, created_at DESC);
+                """
+            )
+            # Referidos: cada persona puede ser recomendada una sola vez
+            # (referred_user_id es PK). estado: 'pendiente' (registrado, aún no
+            # pagó) → 'recompensado' (pagó y se aplicaron las recompensas).
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS referrals (
+                    referred_user_id  BIGINT PRIMARY KEY,
+                    referrer_user_id  BIGINT NOT NULL,
+                    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    estado            TEXT NOT NULL DEFAULT 'pendiente',
+                    rewarded_at       TIMESTAMPTZ
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_referrals_referrer
+                ON referrals (referrer_user_id);
                 """
             )
     logger.info("Base de datos inicializada.")
@@ -1217,11 +1248,11 @@ def marcar_acceso_revocado(user_id: int, revocado: bool = True) -> None:
         logger.error("Error marcando acceso_revocado para %s: %s", user_id, e)
 
 
-def _extend_user_cur(cur, user_id, username, full_name, plan, today):
+def _extend_user_cur(cur, user_id, username, full_name, plan, today, dias=PLAN_DAYS):
     """
-    Upsert 'extend' sobre un cursor existente: suma PLAN_DAYS sobre la fecha
-    de fin vigente (o sobre hoy si ya caducó / no existe). Pensado para
-    participar en una transacción mayor.
+    Upsert 'extend' sobre un cursor existente: suma `dias` (por defecto
+    PLAN_DAYS) sobre la fecha de fin vigente (o sobre hoy si ya caducó / no
+    existe). Pensado para participar en una transacción mayor.
     """
     cur.execute(
         "SELECT fecha_fin FROM users WHERE telegram_user_id = %s",
@@ -1233,11 +1264,36 @@ def _extend_user_cur(cur, user_id, username, full_name, plan, today):
         if isinstance(old_expiry, str):
             old_expiry = parse_date(old_expiry)
         base_date = old_expiry if old_expiry >= today else today
-        new_expiry = base_date + timedelta(days=PLAN_DAYS)
+        new_expiry = base_date + timedelta(days=dias)
     else:
-        new_expiry = today + timedelta(days=PLAN_DAYS)
+        new_expiry = today + timedelta(days=dias)
     cur.execute(_UPSERT_USER_SQL, (user_id, username, full_name, plan, today, new_expiry))
     return cur.fetchone()
+
+
+def _recompensar_referidor_cur(cur, referrer_id, plan_fallback, today, dias):
+    """
+    Suma `dias` gratis al referidor sobre un cursor existente, preservando su
+    identidad y plan. Si el referidor no tenía suscripción, le crea una del
+    plan del recomendado (plan_fallback). Devuelve la fila resultante.
+    """
+    cur.execute(
+        "SELECT username, full_name, plan FROM users WHERE telegram_user_id = %s",
+        (referrer_id,),
+    )
+    row = cur.fetchone()
+    if row:
+        username, full_name, plan = row["username"], row["full_name"], row["plan"]
+    else:
+        cur.execute(
+            "SELECT username, full_name FROM bot_visitors WHERE telegram_user_id = %s",
+            (referrer_id,),
+        )
+        v = cur.fetchone()
+        username = v["username"] if v else None
+        full_name = (v["full_name"] if v else None) or f"Usuario {referrer_id}"
+        plan = plan_fallback
+    return _extend_user_cur(cur, referrer_id, username, full_name, plan, today, dias)
 
 
 def _set_user_cur(cur, user_id, username, full_name, plan, today, days):
@@ -1256,9 +1312,15 @@ def _set_user_cur(cur, user_id, username, full_name, plan, today, days):
 
 def aprobar_pago_tx(user_id: int, plan: str, actor_id: int, via: str):
     """
-    Aprobación atómica de un pago pendiente. Devuelve (record, plan_anterior,
-    pending) o None si no había pago pendiente (idempotencia: una segunda
-    aprobación no extiende nada).
+    Aprobación atómica de un pago pendiente. Devuelve
+    (record, plan_anterior, pending, referido_info) o None si no había pago
+    pendiente (idempotencia: una segunda aprobación no extiende nada).
+
+    Si el usuario vino recomendado y aún no se ha recompensado el referido,
+    en la MISMA transacción: aplica el 2x1 al recomendado (días dobles),
+    suma REFERIDOR_DIAS al referidor y marca el referido como recompensado.
+    `referido_info` es None si no había referido pendiente, o un dict con
+    {referrer_id, referrer_record} para que el llamador avise por Telegram.
     """
     today = today_date()
     with get_conn() as conn:
@@ -1274,18 +1336,54 @@ def aprobar_pago_tx(user_id: int, plan: str, actor_id: int, via: str):
             row = cur.fetchone()
             plan_anterior = row["plan"] if row else None
 
+            # ¿Tiene un referido pendiente? (su primer pago activa el 2x1)
+            cur.execute(
+                "SELECT referrer_user_id FROM referrals "
+                "WHERE referred_user_id = %s AND estado = 'pendiente'",
+                (user_id,),
+            )
+            ref_row = cur.fetchone()
+            es_referido = ref_row is not None
+            dias = PLAN_DAYS * REFERIDO_MULTIPLICADOR if es_referido else PLAN_DAYS
+
             record = _extend_user_cur(
-                cur, user_id, pending["username"], pending["full_name"], plan, today
+                cur, user_id, pending["username"], pending["full_name"],
+                plan, today, dias,
             )
             _registrar_acceso_cur(cur, user_id, plan)
 
             detalle = via if not plan_anterior else f"{via} plan_anterior={plan_anterior}"
+            if es_referido:
+                detalle += f" | 2x1 referido ({dias}d)"
             _registrar_evento_cur(
                 cur, "aprobacion", target_user_id=user_id, actor_id=actor_id,
                 actor_tipo="admin", plan=plan, fecha_fin=record["fecha_fin"],
                 detalle=detalle,
             )
-    return record, plan_anterior, pending
+
+            referido_info = None
+            if es_referido:
+                referrer_id = ref_row["referrer_user_id"]
+                referrer_record = _recompensar_referidor_cur(
+                    cur, referrer_id, plan, today, REFERIDOR_DIAS
+                )
+                _registrar_acceso_cur(cur, referrer_id, referrer_record["plan"])
+                cur.execute(
+                    "UPDATE referrals SET estado = 'recompensado', rewarded_at = NOW() "
+                    "WHERE referred_user_id = %s",
+                    (user_id,),
+                )
+                _registrar_evento_cur(
+                    cur, "referido_recompensa", target_user_id=referrer_id,
+                    actor_tipo="sistema", plan=referrer_record["plan"],
+                    fecha_fin=referrer_record["fecha_fin"],
+                    detalle=f"por recomendar a {user_id} (+{REFERIDOR_DIAS}d)",
+                )
+                referido_info = {
+                    "referrer_id": referrer_id,
+                    "referrer_record": referrer_record,
+                }
+    return record, plan_anterior, pending, referido_info
 
 
 def renovar_tx(user_id: int, plan: str, username: str | None, full_name: str, actor_id: int):
@@ -1411,6 +1509,7 @@ def menu_markup() -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton("🔥 GOLES + CORNERS — 30€", callback_data="combo")],
         [InlineKeyboardButton("📊 PREPARTIDO — 20€", callback_data="pre")],
+        [InlineKeyboardButton("🎁 Invitar amigos (gana 1 mes)", callback_data="referido")],
         [InlineKeyboardButton("💬 Contacto",          url="https://t.me/erikenobi")],
     ])
 
@@ -1488,6 +1587,74 @@ def registrar_visitante(user_id: int, username: str | None, full_name: str) -> b
 
 
 # ==============================
+# DB — REFERIDOS
+# ==============================
+
+def registrar_referido(referred_user_id: int, referrer_user_id: int) -> bool:
+    """
+    Registra que `referred_user_id` viene recomendado por `referrer_user_id`.
+    Solo si: no es autorreferencia, el recomendado no estaba ya referido y aún
+    no es un suscriptor (no se puede 'referir' a alguien que ya está en users).
+    Devuelve True si se registró el referido.
+    """
+    if referred_user_id == referrer_user_id:
+        return False
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM users WHERE telegram_user_id = %s",
+                    (referred_user_id,),
+                )
+                if cur.fetchone():
+                    return False  # ya es/ha sido suscriptor: no aplica
+                cur.execute(
+                    """
+                    INSERT INTO referrals (referred_user_id, referrer_user_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (referred_user_id) DO NOTHING
+                    """,
+                    (referred_user_id, referrer_user_id),
+                )
+                return cur.rowcount == 1
+    except Exception as e:
+        logger.error("Error registrando referido %s→%s: %s",
+                     referrer_user_id, referred_user_id, e)
+        return False
+
+
+def stats_referidos(user_id: int) -> dict:
+    """Devuelve {'total': N, 'recompensados': M} de los referidos de un usuario."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN estado = 'recompensado' THEN 1 ELSE 0 END) AS recompensados
+                    FROM referrals WHERE referrer_user_id = %s
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone() or {}
+                return {
+                    "total": row.get("total") or 0,
+                    "recompensados": row.get("recompensados") or 0,
+                }
+    except Exception as e:
+        logger.error("Error obteniendo stats de referidos de %s: %s", user_id, e)
+        return {"total": 0, "recompensados": 0}
+
+
+def referral_link(user_id: int) -> str | None:
+    """Enlace de referido del usuario. None si aún no se conoce el username del bot."""
+    if not BOT_USERNAME:
+        return None
+    return f"https://t.me/{BOT_USERNAME}?start=ref{user_id}"
+
+
+# ==============================
 # USER FLOW
 # ==============================
 
@@ -1499,8 +1666,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user and rate_limited(user.id, "start"):
         return
 
+    vino_referido = False
     if user:
-        if await _run_db(registrar_visitante, user.id, user.username, user.full_name):
+        es_nuevo = await _run_db(registrar_visitante, user.id, user.username, user.full_name)
+        if es_nuevo:
             username_admin = f"@{user.username}" if user.username else "(sin username)"
             texto_admin = (
                 "👤 Nuevo usuario en el bot\n\n"
@@ -1514,6 +1683,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception as e:
                     logger.error(f"Error avisando nuevo usuario al admin {admin_id}: {e}")
 
+        # Deep link de referido: /start ref<referrer_id>. Solo cuenta si el
+        # usuario es nuevo (no farmear referidos con cuentas ya existentes).
+        if es_nuevo and context.args and context.args[0].startswith("ref"):
+            try:
+                referrer_id = int(context.args[0][3:])
+            except ValueError:
+                referrer_id = None
+            if referrer_id and await _run_db(registrar_referido, user.id, referrer_id):
+                vino_referido = True
+                logger.info("Referido registrado: %s recomendado por %s", user.id, referrer_id)
+                for admin_id in ADMIN_IDS:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=admin_id,
+                            text=(
+                                f"🔗 Nuevo referido: {user.id} ({user.full_name}) "
+                                f"viene recomendado por {referrer_id}."
+                            ),
+                        )
+                    except Exception as e:
+                        logger.error("Error avisando referido al admin %s: %s", admin_id, e)
+
         acceso = await _run_db(get_acceso_pendiente, user.id)
         if acceso:
             await update.message.reply_text(
@@ -1523,8 +1714,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
+    bonus_referido = (
+        "🎁 *¡Vienes recomendado!* Tu primera suscripción es *2x1*: "
+        "paga 1 mes y llévate 2.\n\n" if vino_referido else ""
+    )
     texto = (
         "🔥 *Erikenobi Picks Premium*\n\n"
+        f"{bonus_referido}"
         "Alertas de fútbol en tiempo real con análisis estadístico avanzado.\n\n"
         "⚽ *GOLES* — Alertas de gol en directo\n"
         "🚩 *CORNERS* — Mercados de córners en vivo\n"
@@ -1554,6 +1750,49 @@ async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"Tu user_id es: {user.id}\nUsername: {username}"
     )
+
+
+async def _panel_referido(user_id: int):
+    """Construye el texto y el teclado del panel de referidos de un usuario."""
+    link = referral_link(user_id)
+    if not link:
+        return (
+            "⚠️ El sistema de referidos se está iniciando. Inténtalo en un minuto.",
+            volver_markup(),
+        )
+    stats = await _run_db(stats_referidos, user_id)
+    texto = (
+        "🎁 *Invita y gana*\n\n"
+        "Comparte tu enlace personal. Cuando un amigo *nuevo* se suscriba:\n"
+        f"• Tú ganas *{REFERIDOR_DIAS} días* gratis.\n"
+        "• Tu amigo recibe *2x1* en su primera suscripción (paga 1 mes, lleva 2).\n\n"
+        "🔗 Tu enlace (tócalo para copiarlo):\n"
+        f"`{link}`\n\n"
+        f"👥 Invitados: *{stats['total']}*  ·  💰 Suscritos: *{stats['recompensados']}*"
+    )
+    share_text = (
+        "Te invito a Erikenobi Picks Premium: con mi enlace tu primera "
+        "suscripción es 2x1 (paga 1 mes y llévate 2)."
+    )
+    share_url = (
+        "https://t.me/share/url?url=" + quote(link, safe="")
+        + "&text=" + quote(share_text, safe="")
+    )
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Compartir enlace", url=share_url)],
+        [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
+    ])
+    return texto, markup
+
+
+async def referido_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra al usuario su enlace de referido y estadísticas. Uso: /referido"""
+    user = update.effective_user
+    if not user:
+        return
+    await _run_db(registrar_visitante, user.id, user.username, user.full_name)
+    texto, markup = await _panel_referido(user.id)
+    await update.message.reply_text(texto, reply_markup=markup, parse_mode="Markdown")
 
 
 async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1673,6 +1912,11 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             ]),
             parse_mode="MarkdownV2",
         )
+        return
+
+    if plan == "referido":
+        texto, markup = await _panel_referido(user.id)
+        await query.edit_message_text(texto, reply_markup=markup, parse_mode="Markdown")
         return
 
     _GUIA_PAGO = (
@@ -2312,6 +2556,40 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ADMIN FLOW
 # ==============================
 
+async def _notificar_recompensa_referido(context: ContextTypes.DEFAULT_TYPE, referido_info) -> None:
+    """Avisa al referidor (y al admin) de su mes gratis. No-op si no hubo referido."""
+    if not referido_info:
+        return
+    referrer_id = referido_info["referrer_id"]
+    rec = referido_info["referrer_record"]
+    try:
+        await context.bot.send_message(
+            chat_id=referrer_id,
+            text=(
+                "🎁 *¡Tu recomendación se ha suscrito!*\n\n"
+                f"Te hemos regalado *{REFERIDOR_DIAS} días* de servicio.\n"
+                f"Plan: *{rec['plan'].upper()}*\n"
+                f"Válido hasta: {rec['fecha_fin']}\n\n"
+                "Pulsa el botón para asegurar tu acceso al canal."
+            ),
+            reply_markup=acceso_listo_markup(),
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.error("Error avisando recompensa de referido a %s: %s", referrer_id, e)
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"🎁 Referido recompensado: el referidor {referrer_id} gana "
+                    f"{REFERIDOR_DIAS} días ({rec['plan']}, hasta {rec['fecha_fin']})."
+                ),
+            )
+        except Exception as e:
+            logger.error("Error avisando referido al admin %s: %s", admin_id, e)
+
+
 async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -2348,19 +2626,24 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     "(¿ya aprobado o rechazado?)."
                 )
                 return
-            record, plan_anterior, _ = result
+            record, plan_anterior, _, referido_info = result
 
             # Efectos externos (Telegram) DESPUÉS del commit. Si cambió de plan,
             # expulsar de los canales que ya no le corresponden.
             await _expulsar_canales_obsoletos(context, user_id_int, plan_anterior, plan)
 
+            bonus_txt = (
+                "\n🎁 *Incluye tu 2x1 por venir recomendado* (¡el doble de tiempo!)."
+                if referido_info else ""
+            )
             try:
                 await context.bot.send_message(
                     chat_id=user_id_int,
                     text=(
                         "✅ *Pago aprobado*\n\n"
                         f"Plan activo: *{plan.upper()}*\n"
-                        f"Válido hasta: {record['fecha_fin']}\n\n"
+                        f"Válido hasta: {record['fecha_fin']}"
+                        f"{bonus_txt}\n\n"
                         "Pulsa el botón cuando estés listo para entrar al canal.\n"
                         "El enlace se generará en el momento y tendrá 1 hora de validez."
                     ),
@@ -2370,10 +2653,17 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             except Exception as e:
                 logger.error(f"Error avisando acceso a {user_id_int}: {e}")
 
+            await _notificar_recompensa_referido(context, referido_info)
+
+            extra_admin = (
+                f"\n🎁 Era un referido: 2x1 aplicado y +{REFERIDOR_DIAS}d al referidor "
+                f"{referido_info['referrer_id']}." if referido_info else ""
+            )
             await query.edit_message_text(
                 f"✅ Usuario {user_id_int} aprobado para {plan.upper()}.\n"
                 f"Activo hasta {record['fecha_fin']}.\n"
                 "El usuario recibirá el enlace cuando pulse 'Obtener mi acceso'."
+                + extra_admin
             )
             logger.info(f"Pago aprobado: user {user_id_int} | plan {plan} | hasta {record['fecha_fin']}")
             return
@@ -2455,18 +2745,23 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Ese usuario no está en pendientes (¿ya aprobado o rechazado?)."
         )
         return
-    record, plan_anterior, _ = result
+    record, plan_anterior, _, referido_info = result
 
     # Si cambió de plan, expulsar de los canales que ya no le corresponden
     await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
 
+    bonus_txt = (
+        "\n🎁 *Incluye tu 2x1 por venir recomendado* (¡el doble de tiempo!)."
+        if referido_info else ""
+    )
     try:
         await context.bot.send_message(
             chat_id=target_user_id,
             text=(
                 "✅ *Pago aprobado*\n\n"
                 f"Plan activo: *{plan.upper()}*\n"
-                f"Válido hasta: {record['fecha_fin']}\n\n"
+                f"Válido hasta: {record['fecha_fin']}"
+                f"{bonus_txt}\n\n"
                 "Pulsa el botón cuando estés listo para entrar al canal.\n"
                 "El enlace se generará en el momento y tendrá 1 hora de validez."
             ),
@@ -2475,9 +2770,13 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         await update.message.reply_text(
             f"Usuario {target_user_id} aprobado para {plan} hasta {record['fecha_fin']}."
+            + (f"\n🎁 Referido: 2x1 + {REFERIDOR_DIAS}d al referidor "
+               f"{referido_info['referrer_id']}." if referido_info else "")
         )
     except Exception as e:
         await update.message.reply_text(f"Error avisando al usuario: {e}")
+
+    await _notificar_recompensa_referido(context, referido_info)
 
 
 async def rechazar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2572,6 +2871,7 @@ _EVENT_EMOJI = {
     "expulsion_manual": "🚷",
     "cancelacion":      "🛑",
     "reembolso":        "💸",
+    "referido_recompensa": "🎁",
     "acceso_entregado": "🔑",
 }
 
@@ -3890,6 +4190,18 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(f"Error capturado: {context.error}", exc_info=context.error)
 
 
+async def _post_init(app) -> None:
+    """Al arrancar: resuelve el @username del bot para los enlaces de referido."""
+    global BOT_USERNAME
+    if not BOT_USERNAME:
+        try:
+            me = await app.bot.get_me()
+            BOT_USERNAME = me.username
+            logger.info("Bot username resuelto: @%s", BOT_USERNAME)
+        except Exception as e:
+            logger.error("No se pudo resolver el username del bot: %s", e)
+
+
 # ==============================
 # MAIN
 # ==============================
@@ -3910,11 +4222,12 @@ def main() -> None:
     init_pool()
     init_db()
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).post_init(_post_init).build()
 
     app.add_handler(CommandHandler("start",         start))
     app.add_handler(CommandHandler("help",          help_command))
     app.add_handler(CommandHandler("whoami",        whoami))
+    app.add_handler(CommandHandler("referido",      referido_command))
     app.add_handler(CommandHandler("aprobar",       aprobar))
     app.add_handler(CommandHandler("rechazar",      rechazar))
     app.add_handler(CommandHandler("estado",        estado))
