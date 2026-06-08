@@ -635,14 +635,32 @@ def get_plan_channels(plan: str) -> list[tuple[str, int]]:
     return []
 
 
-async def generar_enlaces_acceso(context: ContextTypes.DEFAULT_TYPE, plan: str) -> list[tuple[str, str]]:
+async def generar_enlaces_acceso(
+    context: ContextTypes.DEFAULT_TYPE, plan: str, user_id: int | None = None
+) -> list[tuple[str, str]]:
     """
     Genera enlaces de invitación frescos en el momento de la llamada.
     Cada enlace tiene 1 uso y caduca en INVITE_EXPIRY_HOURS horas.
+
+    Si se pasa user_id, antes de crear el enlace se levanta cualquier ban
+    previo del usuario en el canal (only_if_banned=True, no-op si no estaba
+    baneado). Un usuario baneado NO puede entrar ni con un enlace válido, y
+    una expulsión cuyo unban falló deja al usuario atascado: este desbaneo
+    preventivo lo arregla al entregar el acceso.
     """
     canales = get_plan_channels(plan)
     enlaces = []
     for titulo, chat_id in canales:
+        if user_id is not None:
+            try:
+                await context.bot.unban_chat_member(
+                    chat_id=chat_id, user_id=user_id, only_if_banned=True
+                )
+            except Exception as e:
+                logger.warning(
+                    "No se pudo desbanear preventivamente a %s en %s: %s",
+                    user_id, chat_id, e,
+                )
         invite = await context.bot.create_chat_invite_link(
             chat_id=chat_id,
             name=f"{plan}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
@@ -2023,7 +2041,7 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
     await _revocar_enlaces(context, acceso.get("ultimos_enlaces"))
 
     try:
-        enlaces = await generar_enlaces_acceso(context, plan)
+        enlaces = await generar_enlaces_acceso(context, plan, user_id=user.id)
     except Exception as e:
         logger.error(f"Error generando enlaces para {user.id}: {e}")
         await query.edit_message_text(
@@ -2903,7 +2921,7 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # de forma que pueda compartirlo manualmente (WhatsApp, DM, etc.)
     # si el bot no puede mandar mensaje al usuario directamente.
     try:
-        enlaces = await generar_enlaces_acceso(context, plan)
+        enlaces = await generar_enlaces_acceso(context, plan, user_id=target_user_id)
     except Exception as e:
         logger.error("Error generando enlaces en /renovar para %s: %s", target_user_id, e)
         enlaces = []
@@ -2985,7 +3003,7 @@ async def link_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     plan = row["plan"]
     try:
-        enlaces = await generar_enlaces_acceso(context, plan)
+        enlaces = await generar_enlaces_acceso(context, plan, user_id=target_user_id)
     except Exception as e:
         logger.error("Error generando enlaces en /link para %s: %s", target_user_id, e)
         await update.message.reply_text(f"Error generando enlaces: {e}")
@@ -3077,7 +3095,7 @@ async def regalar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
 
     try:
-        enlaces = await generar_enlaces_acceso(context, plan)
+        enlaces = await generar_enlaces_acceso(context, plan, user_id=target_user_id)
     except Exception as e:
         logger.error("Error generando enlaces en /regalar para %s: %s", target_user_id, e)
         enlaces = []
@@ -3170,6 +3188,49 @@ async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"⚠️ Usuario {target_user_id} marcado como caducado, pero el ban falló "
             "en alguno de los canales. Revisa los permisos del bot y reintenta con /reexpulsar."
         )
+
+
+async def desbanear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Levanta el ban de un usuario en TODOS los canales (only_if_banned).
+    Útil cuando una expulsión anterior dejó al usuario baneado y no puede
+    entrar ni con un enlace válido. Uso: /desbanear user_id
+    """
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("Uso: /desbanear user_id")
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El user_id no es válido.")
+        return
+
+    canales = [
+        ("⚽ GOLES", CANAL_GOLES_ID),
+        ("🚩 CORNERS", CANAL_CORNERS_ID),
+        ("📊 PREPARTIDO", CANAL_PRE_ID),
+    ]
+    lineas = []
+    for titulo, chat_id in canales:
+        try:
+            await context.bot.unban_chat_member(
+                chat_id=chat_id, user_id=target_user_id, only_if_banned=True
+            )
+            lineas.append(f"✅ {titulo}")
+        except Exception as e:
+            logger.error("Error desbaneando %s en %s: %s", target_user_id, chat_id, e)
+            lineas.append(f"❌ {titulo}: {e}")
+
+    await update.message.reply_text(
+        f"🔓 Desbaneo de {target_user_id}:\n" + "\n".join(lineas) +
+        "\n\nYa puede volver a usar su enlace de acceso."
+    )
+    logger.info("Admin desbaneó manualmente al usuario %s de todos los canales", target_user_id)
 
 
 async def _baja_usuario(
@@ -3658,6 +3719,7 @@ def main() -> None:
     app.add_handler(CommandHandler("activos",       activos))
     app.add_handler(CommandHandler("expulsar",      expulsar))
     app.add_handler(CommandHandler("reexpulsar",    reexpulsar))
+    app.add_handler(CommandHandler("desbanear",     desbanear))
     app.add_handler(CommandHandler("cancelar",      cancelar))
     app.add_handler(CommandHandler("reembolsar",    reembolsar))
     app.add_handler(CommandHandler("renovar",       renovar))
