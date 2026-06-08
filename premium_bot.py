@@ -191,6 +191,14 @@ def init_db():
                     ADD COLUMN IF NOT EXISTS acceso_revocado BOOLEAN NOT NULL DEFAULT FALSE;
                 """
             )
+            # Motivo de la baja para estados 'cancelado' / 'reembolsado'
+            # (texto libre del admin). NULL mientras la suscripción está activa.
+            cur.execute(
+                """
+                ALTER TABLE users
+                    ADD COLUMN IF NOT EXISTS motivo_baja TEXT;
+                """
+            )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS pending_payments (
@@ -1076,6 +1084,7 @@ _UPSERT_USER_SQL = """
         fecha_fin       = EXCLUDED.fecha_fin,
         estado          = 'activo',
         acceso_revocado = FALSE,
+        motivo_baja     = NULL,
         updated_at      = NOW()
     RETURNING telegram_user_id, username, full_name, plan, fecha_inicio, fecha_fin, estado
 """
@@ -2351,7 +2360,8 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT telegram_user_id, plan, fecha_inicio, fecha_fin, estado
+                SELECT telegram_user_id, plan, fecha_inicio, fecha_fin, estado,
+                       acceso_revocado, motivo_baja
                 FROM users WHERE telegram_user_id = %s
                 """,
                 (user_id,),
@@ -2362,13 +2372,18 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Ese usuario no tiene suscripción registrada.")
         return
 
-    await update.message.reply_text(
+    texto = (
         f"Usuario: {record['telegram_user_id']}\n"
         f"Plan: {record['plan']}\n"
         f"Inicio: {record['fecha_inicio']}\n"
         f"Fin: {record['fecha_fin']}\n"
         f"Estado: {record['estado']}"
     )
+    if record["estado"] != "activo":
+        texto += f"\nAcceso revocado: {'sí' if record['acceso_revocado'] else 'no'}"
+    if record.get("motivo_baja"):
+        texto += f"\nMotivo: {record['motivo_baja']}"
+    await update.message.reply_text(texto)
 
 
 # Emojis por tipo de evento para que el historial se lea de un vistazo.
@@ -2380,6 +2395,8 @@ _EVENT_EMOJI = {
     "trial":            "🆓",
     "caducidad":        "⌛",
     "expulsion_manual": "🚷",
+    "cancelacion":      "🛑",
+    "reembolso":        "💸",
     "acceso_entregado": "🔑",
 }
 
@@ -3137,6 +3154,91 @@ async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+async def _baja_usuario(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    estado_nuevo: str,
+    evento: str,
+    etiqueta: str,
+    cmd: str,
+) -> None:
+    """
+    Lógica común a /cancelar y /reembolsar: expulsa de los canales, marca el
+    estado correspondiente con su motivo, limpia el acceso pendiente y audita.
+    Uso del comando: /<cmd> user_id [motivo libre]
+    """
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text(f"Uso: /{cmd} user_id [motivo]")
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El user_id no es válido.")
+        return
+
+    motivo = " ".join(context.args[1:]).strip() or None
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT plan, estado FROM users WHERE telegram_user_id = %s",
+                (target_user_id,),
+            )
+            record = cur.fetchone()
+
+    if not record:
+        await update.message.reply_text("Ese usuario no está registrado.")
+        return
+
+    ok = await expulsar_de_canales(context, target_user_id, record["plan"])
+    borrar_acceso_pendiente(target_user_id)
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET estado = %s, motivo_baja = %s, acceso_revocado = %s, "
+                "updated_at = NOW() WHERE telegram_user_id = %s",
+                (estado_nuevo, motivo, ok, target_user_id),
+            )
+
+    registrar_evento(
+        evento, target_user_id=target_user_id,
+        actor_id=update.effective_user.id, actor_tipo="admin",
+        plan=record["plan"],
+        detalle=(motivo or "") + (f" | ban_ok={ok}" if not ok else ""),
+    )
+
+    detalle_motivo = f"\nMotivo: {motivo}" if motivo else ""
+    if ok:
+        await update.message.reply_text(
+            f"✅ Usuario {target_user_id} marcado como {estado_nuevo.upper()} y expulsado.{detalle_motivo}"
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ Usuario {target_user_id} marcado como {estado_nuevo.upper()}, pero el ban falló "
+            f"en algún canal. Reintenta con /reexpulsar.{detalle_motivo}"
+        )
+    logger.info(
+        "%s: user %s | plan %s | motivo=%s | ban_ok=%s",
+        etiqueta, target_user_id, record["plan"], motivo, ok,
+    )
+
+
+async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancela la suscripción de un usuario (estado 'cancelado'). Uso: /cancelar user_id [motivo]"""
+    await _baja_usuario(update, context, "cancelado", "cancelacion", "Cancelación", "cancelar")
+
+
+async def reembolsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Marca un reembolso y retira el acceso (estado 'reembolsado'). Uso: /reembolsar user_id [motivo]"""
+    await _baja_usuario(update, context, "reembolsado", "reembolso", "Reembolso", "reembolsar")
+
+
 async def reexpulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Reintenta expulsar a todos los usuarios marcados como 'caducado'
@@ -3147,22 +3249,20 @@ async def reexpulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("No tienes permisos.")
         return
 
-    today = today_date()
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT telegram_user_id, plan, full_name, username, fecha_fin
+                SELECT telegram_user_id, plan, full_name, username, fecha_fin, estado
                 FROM users
-                WHERE estado = 'caducado' AND acceso_revocado = FALSE AND fecha_fin < %s
+                WHERE estado <> 'activo' AND acceso_revocado = FALSE
                 ORDER BY fecha_fin ASC
-                """,
-                (today,),
+                """
             )
             rows = cur.fetchall()
 
     if not rows:
-        await update.message.reply_text("No hay usuarios caducados pendientes de expulsar.")
+        await update.message.reply_text("No hay usuarios dados de baja pendientes de expulsar.")
         return
 
     lineas = []
@@ -3180,7 +3280,7 @@ async def reexpulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             ok_count += 1
             marcar_acceso_revocado(int(user_id), True)
         marca = "✅" if ok else "❌"
-        lineas.append(f"{marca} {user_id} | {nombre} | {plan} | fin {row['fecha_fin']}")
+        lineas.append(f"{marca} {user_id} | {nombre} | {plan} | {row['estado']} | fin {row['fecha_fin']}")
 
     cabecera = f"🔁 Reexpulsión: {ok_count}/{len(rows)} OK\n\n"
     await update.message.reply_text((cabecera + "\n".join(lineas))[:4000])
@@ -3407,22 +3507,23 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             logger.error(f"Error revisando expiración de {record.get('telegram_user_id')}: {e}")
 
-    # ── Segunda pasada: reintentar expulsión SOLO de los caducados recientes
-    # cuyo acceso aún no se ha revocado con éxito (acceso_revocado = FALSE).
-    # El flag evita re-banear en cada ciclo a los ya expulsados, y la ventana
-    # de REEXPULSION_RETRY_DAYS evita re-escanear el histórico antiguo.
+    # ── Segunda pasada: reintentar expulsión de cualquier usuario dado de baja
+    # recientemente (caducado/cancelado/reembolsado) cuyo acceso aún no se ha
+    # revocado con éxito. El flag acceso_revocado evita re-banear en cada ciclo
+    # a los ya expulsados; la recencia por updated_at (REEXPULSION_RETRY_DAYS)
+    # evita re-escanear el histórico antiguo y cubre las bajas anticipadas
+    # (cancelaciones antes de fecha_fin).
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT telegram_user_id, plan
                 FROM users
-                WHERE estado = 'caducado'
+                WHERE estado <> 'activo'
                   AND acceso_revocado = FALSE
-                  AND fecha_fin < %s
-                  AND fecha_fin >= %s
+                  AND updated_at >= NOW() - (%s * INTERVAL '1 day')
                 """,
-                (today, today - timedelta(days=REEXPULSION_RETRY_DAYS)),
+                (REEXPULSION_RETRY_DAYS,),
             )
             pendientes = cur.fetchall()
 
@@ -3539,6 +3640,8 @@ def main() -> None:
     app.add_handler(CommandHandler("activos",       activos))
     app.add_handler(CommandHandler("expulsar",      expulsar))
     app.add_handler(CommandHandler("reexpulsar",    reexpulsar))
+    app.add_handler(CommandHandler("cancelar",      cancelar))
+    app.add_handler(CommandHandler("reembolsar",    reembolsar))
     app.add_handler(CommandHandler("renovar",       renovar))
     app.add_handler(CommandHandler("regalar",       regalar))
     app.add_handler(CommandHandler("link",          link_admin))
