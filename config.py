@@ -41,7 +41,9 @@ STRIPE_PRE     = "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
 
 # ── Suscripciones / trials / accesos ────────────────────────────────────────
 PLAN_DAYS    = 30
-TRIAL_DAYS   = 3
+# Duración de la prueba gratuita. Parametrizable por entorno (default 7 días).
+# Solo afecta a trials NUEVOS: los ya activos conservan su fecha_fin.
+TRIAL_DAYS   = int(os.getenv("TRIAL_DAYS", "7"))
 INVITE_EXPIRY_HOURS = 1
 
 # Referidos: el referidor gana REFERIDOR_DIAS gratis y el recomendado recibe

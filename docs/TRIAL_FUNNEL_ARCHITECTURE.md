@@ -144,17 +144,25 @@ longitud de Telegram (64 chars) respetado usando claves cortas.
 9. No paga → al expirar, `check_expirations` expulsa, `status=trial_expired`,
    mensaje de conversión.
 
-## 7. Decisiones que requieren confirmación antes de implementar
+## 7. Decisiones (confirmadas con el responsable)
 
-1. **Trial 3→7 días**: ¿aplicar a nuevos trials solamente (recomendado) o
-   también recalcular los activos? (Recomendado: solo nuevos, vía `TRIAL_DAYS`.)
-2. **Mapeo correcto de IDs de canal** (R1): confirmar qué ID es GOLES y cuál
-   CORNERS, y unificar ambos repos a una única fuente (env compartida).
-3. **Pasarela de pago**: ¿se mantiene aprobación manual (actual) o se integra
-   webhook (Stripe) para `premium_active` automático? El diseño deja el hueco
-   (`payment_provider_customer_id`, `PAYMENT_WEBHOOK_SECRET`) preparado.
-4. **¿Trial sobre qué plan?** Hoy `trial:PLAN`. ¿La prueba de 7d da acceso a un
-   plan concreto, al COMBO, o a todos los canales?
+1. **Trial 3→7 días** → ✅ **Solo nuevos trials**. Implementado vía
+   `TRIAL_DAYS=int(os.getenv("TRIAL_DAYS","7"))`; los trials activos conservan su
+   `fecha_fin`.
+2. **Mapeo de IDs de canal** → ✅ **No requiere cambio**: ambos repos ya
+   coinciden (`GOLES=-1003818905455`, `CORNERS=-1003895151594`). El "R1" era un
+   error de la auditoría inicial.
+3. **Pasarela de pago** → ✅ **Se mantiene manual**. Solo se deja preparado el
+   hueco (`payment_provider_customer_id`, `PAYMENT_WEBHOOK_SECRET`).
+4. **¿Trial sobre qué plan?** → ⏳ **Pendiente**. De momento, `start=trial_7d`
+   muestra un banner de bienvenida y el usuario elige plan (flujo `trial:PLAN`
+   existente). No se fija un plan por defecto hasta decidirlo.
+
+### Nota de implementación
+El tracking de origen (first-touch) se persiste en `bot_visitors`
+(`source`, `utm_*`, `start_param`), no en `users`, para no tocar las
+transacciones de alta/trial (menor riesgo sobre código vivo). La atribución de
+conversiones se obtiene por `JOIN users ↔ bot_visitors`.
 
 ## 8. Orden de implementación propuesto (commits separados)
 

@@ -245,6 +245,17 @@ def init_db():
                 );
                 """
             )
+            # Tracking de origen (first-touch): se rellena en el primer /start a
+            # partir del start param. Atribución por JOIN users↔bot_visitors.
+            # Ver docs/METRICS_AND_TRACKING.md.
+            for _col in (
+                "source", "utm_source", "utm_medium",
+                "utm_campaign", "utm_content", "start_param",
+            ):
+                cur.execute(
+                    f"ALTER TABLE bot_visitors "
+                    f"ADD COLUMN IF NOT EXISTS {_col} TEXT;"
+                )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS encuestas (
@@ -627,6 +638,72 @@ def canonical_plan(plan: str | None) -> str | None:
     if plan is None:
         return None
     return _PLAN_ALIASES.get(plan, plan)
+
+
+# Claves cortas del start param compuesto → campo de tracking. Ver el contrato
+# en docs/TRIAL_FUNNEL_ARCHITECTURE.md §5.
+_START_KEYMAP = {
+    "src": "utm_source",
+    "med": "utm_medium",
+    "cmp": "utm_campaign",
+    "cnt": "utm_content",
+    "ref": "referral_code",
+}
+
+
+def parse_start_param(raw: str | None) -> dict:
+    """
+    Parsea el parámetro de /start y extrae intención, origen (UTM) y referido.
+
+    Formatos soportados (compatibles hacia atrás):
+      - 'ref<id>'           → referido legado (p.ej. 'ref123')
+      - '<intent>'          → solo intención (p.ej. 'trial_7d', 'free', 'goles')
+      - '<intent>__src-..__cmp-..__cnt-..__med-..__ref-..'  → intención + UTM
+
+    Función pura (sin I/O), testeable. Nunca lanza: entrada inválida se ignora.
+    """
+    result = {
+        "intent": None,
+        "source": None,
+        "utm_source": None,
+        "utm_medium": None,
+        "utm_campaign": None,
+        "utm_content": None,
+        "referral_code": None,
+    }
+    if not raw:
+        result["intent"] = "start"
+        return result
+    raw = str(raw).strip()
+
+    # Referido legado: 'ref<digitos>' (sin separadores nuevos).
+    if "__" not in raw and raw.startswith("ref") and raw[3:].isdigit():
+        result["intent"] = "ref"
+        result["referral_code"] = raw[3:]
+        return result
+
+    tokens = raw.split("__")
+    first = tokens[0]
+    # El primer token es la intención posicional salvo que sea un par clave-valor.
+    start_idx = 0
+    head_key = first.split("-", 1)[0] if "-" in first else None
+    if head_key not in _START_KEYMAP:
+        result["intent"] = first or None
+        start_idx = 1
+
+    for tok in tokens[start_idx:]:
+        if "-" not in tok:
+            continue
+        key, value = tok.split("-", 1)
+        field = _START_KEYMAP.get(key)
+        if field and value:
+            result[field] = value
+
+    # source canónico = utm_source (si llegó); el caller puede usar 'direct' si None.
+    result["source"] = result["utm_source"]
+    if result["intent"] is None:
+        result["intent"] = "start"
+    return result
 
 
 def get_plan_channels(plan: str) -> list[tuple[str, int]]:
@@ -1459,21 +1536,42 @@ async def _expulsar_canales_obsoletos(
             )
 
 
-def registrar_visitante(user_id: int, username: str | None, full_name: str) -> bool:
+def registrar_visitante(
+    user_id: int,
+    username: str | None,
+    full_name: str,
+    origen: dict | None = None,
+) -> bool:
     """
-    Registra al usuario en bot_visitors si es la primera vez.
-    Devuelve True si era nuevo, False si ya estaba.
+    Registra al usuario en bot_visitors si es la primera vez, guardando el
+    origen (first-touch). Devuelve True si era nuevo, False si ya estaba.
+
+    `origen` es el dict de parse_start_param (+ 'start_param' crudo opcional).
+    El origen solo se persiste en el primer registro (ON CONFLICT DO NOTHING).
     """
+    origen = origen or {}
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO bot_visitors (telegram_user_id, username, full_name)
-                    VALUES (%s, %s, %s)
+                    INSERT INTO bot_visitors (
+                        telegram_user_id, username, full_name,
+                        source, utm_source, utm_medium,
+                        utm_campaign, utm_content, start_param
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (telegram_user_id) DO NOTHING
                     """,
-                    (user_id, username, full_name),
+                    (
+                        user_id, username, full_name,
+                        origen.get("source"),
+                        origen.get("utm_source"),
+                        origen.get("utm_medium"),
+                        origen.get("utm_campaign"),
+                        origen.get("utm_content"),
+                        origen.get("start_param"),
+                    ),
                 )
                 return cur.rowcount == 1
     except Exception as e:
@@ -1632,8 +1730,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     vino_referido = False
+    intent_trial = False
     if user:
-        es_nuevo = await _run_db(registrar_visitante, user.id, user.username, user.full_name)
+        raw_start = context.args[0] if context.args else None
+        origen = parse_start_param(raw_start)
+        origen["start_param"] = raw_start
+        intent_trial = (origen.get("intent") or "").startswith("trial")
+        es_nuevo = await _run_db(
+            registrar_visitante, user.id, user.username, user.full_name, origen
+        )
         if es_nuevo:
             username_admin = f"@{user.username}" if user.username else "(sin username)"
             texto_admin = (
@@ -1648,12 +1753,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception as e:
                     logger.error(f"Error avisando nuevo usuario al admin {admin_id}: {e}")
 
-        # Deep link de referido: /start ref<referrer_id>. Solo cuenta si el
-        # usuario es nuevo (no farmear referidos con cuentas ya existentes).
-        if es_nuevo and context.args and context.args[0].startswith("ref"):
+        # Deep link de referido: /start ref<referrer_id> (legado) o
+        # '..__ref-<referrer_id>' (nuevo). Solo cuenta si el usuario es nuevo
+        # (no farmear referidos con cuentas ya existentes).
+        if es_nuevo and origen.get("referral_code"):
             try:
-                referrer_id = int(context.args[0][3:])
-            except ValueError:
+                referrer_id = int(origen["referral_code"])
+            except (ValueError, TypeError):
                 referrer_id = None
             if referrer_id and await _run_db(registrar_referido, user.id, referrer_id):
                 vino_referido = True
@@ -1683,8 +1789,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🎁 *¡Vienes recomendado!* Tu primera suscripción es *2x1*: "
         "paga 1 mes y llévate 2.\n\n" if vino_referido else ""
     )
+    banner_trial = (
+        f"🎁 *Prueba gratis {TRIAL_DAYS} días*: elige un plan y activa tu prueba "
+        "sin pagar nada por adelantado.\n\n" if intent_trial else ""
+    )
     texto = (
         "🔥 *Erikenobi Picks Premium*\n\n"
+        f"{banner_trial}"
         f"{bonus_referido}"
         "Alertas de fútbol en tiempo real con análisis estadístico avanzado.\n\n"
         "⚽ *GOLES* — Alertas de gol en directo\n"
@@ -3345,6 +3456,106 @@ async def trials_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text((cabecera + "\n".join(lineas))[:4000])
 
 
+async def funnel_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Resumen del embudo: visitas → trials → pago → activos, con ratios."""
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    today = today_date()
+
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS n FROM bot_visitors")
+                visitantes = cur.fetchone()["n"]
+                cur.execute("SELECT COUNT(*) AS n FROM trials")
+                trials = cur.fetchone()["n"]
+                cur.execute("SELECT COUNT(*) AS n FROM users")
+                usuarios = cur.fetchone()["n"]
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM users "
+                    "WHERE estado = 'activo' AND fecha_fin >= %s",
+                    (today,),
+                )
+                activos = cur.fetchone()["n"]
+                # Convertidos a pago = usaron trial y tienen sub vigente que NO
+                # es la fila del propio trial (fecha_fin > used_at + TRIAL_DAYS).
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM trials t
+                    JOIN users u ON u.telegram_user_id = t.telegram_user_id
+                    WHERE u.estado = 'activo' AND u.fecha_fin >= %s
+                      AND u.fecha_fin > (t.used_at::date + %s)
+                    """,
+                    (today, TRIAL_DAYS),
+                )
+                convertidos = cur.fetchone()["n"]
+                return visitantes, trials, usuarios, activos, convertidos
+
+    visitantes, trials, usuarios, activos, convertidos = await _run_db(_q)
+
+    def _pct(a, b):
+        return f"{(a / b * 100):.1f}%" if b else "—"
+
+    texto = (
+        "📊 *Embudo de conversión*\n\n"
+        f"👀 Visitantes del bot: {visitantes}\n"
+        f"🎁 Trials iniciados: {trials}  ({_pct(trials, visitantes)} de visitas)\n"
+        f"💰 Convertidos a pago: {convertidos}  ({_pct(convertidos, trials)} de trials)\n"
+        f"👥 Usuarios totales: {usuarios}\n"
+        f"✅ Premium activos: {activos}\n"
+    )
+    await update.message.reply_text(texto, parse_mode="Markdown")
+
+
+async def origen_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Altas por origen (source). Uso: /origen [dias] (default 30)."""
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+
+    dias = 30
+    if context.args:
+        try:
+            dias = max(1, min(365, int(context.args[0])))
+        except ValueError:
+            pass
+
+    def _q():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(v.source, 'direct') AS origen,
+                           COUNT(*) AS visitas,
+                           COUNT(u.telegram_user_id) AS convertidos
+                    FROM bot_visitors v
+                    LEFT JOIN users u ON u.telegram_user_id = v.telegram_user_id
+                    WHERE v.first_seen_at >= NOW() - (%s || ' days')::interval
+                    GROUP BY COALESCE(v.source, 'direct')
+                    ORDER BY visitas DESC
+                    """,
+                    (str(dias),),
+                )
+                return cur.fetchall()
+
+    rows = await _run_db(_q)
+    if not rows:
+        await update.message.reply_text(f"Sin altas en los últimos {dias} días.")
+        return
+
+    lineas = [f"📈 *Altas por origen* (últimos {dias} días)\n"]
+    for r in rows:
+        ratio = f"{(r['convertidos'] / r['visitas'] * 100):.0f}%" if r["visitas"] else "—"
+        lineas.append(
+            f"• {r['origen']}: {r['visitas']} visitas → "
+            f"{r['convertidos']} usuarios ({ratio})"
+        )
+    await update.message.reply_text("\n".join(lineas)[:4000], parse_mode="Markdown")
+
+
 async def encuestas_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Muestra el resumen de respuestas de la encuesta de satisfacción."""
     if not _check_admin(update):
@@ -4378,6 +4589,8 @@ def main() -> None:
     app.add_handler(CommandHandler("pendientes",    pendientes))
     app.add_handler(CommandHandler("caducan",       caducan))
     app.add_handler(CommandHandler("trials",        trials_admin))
+    app.add_handler(CommandHandler("funnel",        funnel_admin))
+    app.add_handler(CommandHandler("origen",        origen_admin))
     app.add_handler(CommandHandler("encuestas",     encuestas_admin))
     app.add_handler(CommandHandler("encuesta_pendientes", encuesta_pendientes))
     app.add_handler(CommandHandler("activos",       activos))
