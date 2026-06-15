@@ -214,3 +214,64 @@ def test_formatear_evento():
     assert "aprobacion" in linea
     assert "corners" in linea
     assert "555" in linea
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# parse_start_param (deep-link de /start: intención + UTM + referido)
+# ──────────────────────────────────────────────────────────────────────────
+def test_parse_start_vacio():
+    r = p.parse_start_param("")
+    assert r["intent"] == "start"
+    assert r["source"] is None
+    assert r["referral_code"] is None
+
+
+def test_parse_start_none():
+    r = p.parse_start_param(None)
+    assert r["intent"] == "start"
+
+
+def test_parse_start_solo_intent():
+    assert p.parse_start_param("trial_7d")["intent"] == "trial_7d"
+    assert p.parse_start_param("free")["intent"] == "free"
+    assert p.parse_start_param("goles")["intent"] == "goles"
+
+
+def test_parse_start_ref_legado():
+    r = p.parse_start_param("ref123")
+    assert r["referral_code"] == "123"
+    assert r["intent"] == "ref"
+
+
+def test_parse_start_utm_source():
+    r = p.parse_start_param("trial_7d__src-instagram")
+    assert r["intent"] == "trial_7d"
+    assert r["utm_source"] == "instagram"
+    assert r["source"] == "instagram"
+
+
+def test_parse_start_utm_completo():
+    r = p.parse_start_param("trial_7d__src-instagram__cmp-julio__cnt-story__med-social")
+    assert r["utm_source"] == "instagram"
+    assert r["utm_campaign"] == "julio"
+    assert r["utm_content"] == "story"
+    assert r["utm_medium"] == "social"
+
+
+def test_parse_start_ref_nuevo():
+    r = p.parse_start_param("trial_7d__src-free_channel__ref-456")
+    assert r["referral_code"] == "456"
+    assert r["utm_source"] == "free_channel"
+
+
+def test_parse_start_tokens_invalidos_no_rompen():
+    r = p.parse_start_param("trial_7d__basura__src-x__otro")
+    assert r["utm_source"] == "x"
+    assert r["intent"] == "trial_7d"
+
+
+def test_trial_days_por_defecto_7():
+    # El default debe ser 7 (objetivo del funnel), salvo override por entorno.
+    import os
+    if "TRIAL_DAYS" not in os.environ:
+        assert p.TRIAL_DAYS == 7
