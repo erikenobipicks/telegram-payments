@@ -171,7 +171,7 @@ y `t.me/erikenobi` (contacto). Copy: "Empieza gratis en el bot". SEO básico OK
 
 | # | Riesgo | Severidad | Dónde |
 |---|--------|-----------|-------|
-| R1 | **IDs de canal cruzados entre repos**: en pagos `GOLES=-1003895151594`/`CORNERS=-1003818905455`; en picks `GOLES=-1003818905455`/`CORNERS=-1003895151594` (invertidos). Un mapeo erróneo da/quita acceso al canal equivocado. | 🔴 Crítico | `telegram-payments/config.py` vs `erikenobi-telegram-bot/config.py` |
+| R1 | ~~IDs de canal cruzados entre repos~~ **DESCARTADO** tras verificación directa: ambos repos tienen `GOLES=-1003818905455` y `CORNERS=-1003895151594`. Coinciden; no hay inversión (era un error de lectura de la auditoría inicial). | ✅ Resuelto | `telegram-payments/config.py:21-22` y `erikenobi-telegram-bot/config.py:22-23` |
 | R2 | **Pago sin webhook ni verificación de firma**: aprobación manual → se puede conceder premium sin ingreso real; no hay sincronización con pasarela. | 🔴 Alto | `telegram-payments/premium_bot.py` |
 | R3 | **Trial = 3 días, no 7** (objetivo del proyecto). Cambiarlo afecta a usuarios vivos y a la copy del canal FREE. | 🟡 Alto | `config.py` (ambos bots) |
 | R4 | **Sin tracking de origen (UTM/source)**: no se puede saber si un alta vino de Instagram, canal free o landing. El deep-link solo distingue plan, no campaña. | 🟡 Alto | Los tres repos |
