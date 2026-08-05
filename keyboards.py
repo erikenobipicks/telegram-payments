@@ -5,17 +5,20 @@ Teclados (InlineKeyboardMarkup) del bot. Capa de presentación: solo depende de
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import (
+    CANAL_PINPON_ID,
     PAYPAL_LINK,
     STRIPE_COMBO,
     STRIPE_CORNERS,
     STRIPE_GOLES,
+    STRIPE_PINPON,
     STRIPE_PRE,
     TRIAL_DAYS,
+    TRIAL_PLANS,
 )
 
 
 def menu_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+    filas = [
         [
             InlineKeyboardButton("ℹ️ Cómo funciona", callback_data="info"),
             InlineKeyboardButton("📊 Estadísticas",  callback_data="stats"),
@@ -28,12 +31,18 @@ def menu_markup() -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton("🔥 GOLES + CORNERS — 30€", callback_data="combo")],
         [InlineKeyboardButton("📊 PREPARTIDO — 20€", callback_data="pre")],
+    ]
+    # El botón de Ping Pong solo aparece cuando su canal está configurado.
+    if CANAL_PINPON_ID:
+        filas.append([InlineKeyboardButton("🏓 PING PONG — 50€", callback_data="pinpon")])
+    filas += [
         [InlineKeyboardButton("🎁 Invitar amigos (gana 1 mes)", callback_data="referido")],
         [
             InlineKeyboardButton("🔒 Privacidad", callback_data="privacidad"),
             InlineKeyboardButton("💬 Contacto",   url="https://t.me/erikenobi"),
         ],
-    ])
+    ]
+    return InlineKeyboardMarkup(filas)
 
 
 def volver_markup() -> InlineKeyboardMarkup:
@@ -43,17 +52,19 @@ def volver_markup() -> InlineKeyboardMarkup:
 
 
 def pago_markup(plan: str) -> InlineKeyboardMarkup:
-    precios = {"goles": "20", "corners": "20", "combo": "30", "pre": "20"}
-    stripes = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO, "pre": STRIPE_PRE}
+    precios = {"goles": "20", "corners": "20", "combo": "30", "pre": "20", "pinpon": "50"}
+    stripes = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO,
+               "pre": STRIPE_PRE, "pinpon": STRIPE_PINPON}
     importe = precios.get(plan, "")
 
     stripe_url = stripes.get(plan, "")
-    keyboard = [
-        [InlineKeyboardButton(
+    keyboard = []
+    # La prueba gratis solo se ofrece en los planes con trial (ver TRIAL_PLANS).
+    if plan in TRIAL_PLANS:
+        keyboard.append([InlineKeyboardButton(
             f"🎁 Probar gratis {TRIAL_DAYS} días",
             callback_data=f"trial:{plan}",
-        )],
-    ]
+        )])
     if stripe_url:
         keyboard.append([InlineKeyboardButton("💳 Pagar con tarjeta (Stripe)", url=stripe_url)])
     keyboard += [
@@ -76,6 +87,7 @@ def admin_approval_markup(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ Aprobar PRE",   callback_data=f"approve:pre:{user_id}"),
             InlineKeyboardButton("✅ Aprobar COMBO", callback_data=f"approve:combo:{user_id}"),
         ],
+        [InlineKeyboardButton("✅ Aprobar PING PONG", callback_data=f"approve:pinpon:{user_id}")],
         [InlineKeyboardButton("❌ Rechazar", callback_data=f"reject:{user_id}")],
     ])
 

@@ -178,6 +178,28 @@ def test_admin_approval_markup_incluye_user_id():
     assert "reject:999" in cbs
 
 
+def test_admin_approval_markup_incluye_pinpon():
+    cbs = _callbacks(p.admin_approval_markup(999))
+    assert "approve:pinpon:999" in cbs
+
+
+def test_pago_markup_pinpon_es_de_pago_directo():
+    # Ping pong (50€) es un plan de pago sin prueba gratis: métodos manuales
+    # presentes, pero sin botón de trial.
+    cbs = _callbacks(p.pago_markup("pinpon"))
+    assert "bizum:pinpon" in cbs
+    assert "revolut:pinpon" in cbs
+    assert "trial:pinpon" not in cbs
+    assert "pinpon" not in p.TRIAL_PLANS
+
+
+def test_get_plan_channels_pinpon_sin_config_es_vacio():
+    # Sin CANAL_PINPON_ID configurado (0 en el entorno de test), el plan no
+    # devuelve canal para no operar sobre un chat_id inválido.
+    assert p.CANAL_PINPON_ID == 0
+    assert p.get_plan_channels("pinpon") == []
+
+
 def test_volver_y_acceso_markups():
     assert "menu" in _callbacks(p.volver_markup())
     assert "obtener_acceso" in _callbacks(p.acceso_listo_markup())
