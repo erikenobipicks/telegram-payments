@@ -193,11 +193,16 @@ def test_pago_markup_pinpon_es_de_pago_directo():
     assert "pinpon" not in p.TRIAL_PLANS
 
 
-def test_get_plan_channels_pinpon_sin_config_es_vacio():
-    # Sin CANAL_PINPON_ID configurado (0 en el entorno de test), el plan no
-    # devuelve canal para no operar sobre un chat_id inválido.
-    assert p.CANAL_PINPON_ID == 0
-    assert p.get_plan_channels("pinpon") == []
+def test_get_plan_channels_pinpon():
+    # Con CANAL_PINPON_ID configurado (por defecto el canal OFICIAL), el plan
+    # devuelve exactamente ese canal. Si estuviera a 0, devolvería [] (guard
+    # para no operar sobre un chat_id inválido).
+    canales = p.get_plan_channels("pinpon")
+    if p.CANAL_PINPON_ID:
+        assert len(canales) == 1
+        assert canales[0][1] == p.CANAL_PINPON_ID
+    else:
+        assert canales == []
 
 
 def test_volver_y_acceso_markups():

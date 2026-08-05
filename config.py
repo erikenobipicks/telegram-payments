@@ -22,10 +22,12 @@ CANAL_CORNERS_ID = -1003895151594
 CANAL_GOLES_ID   = -1003818905455
 CANAL_PRE_ID     = -1003837149453   # Over 2.5 FT prepartido — análisis manual
 
-# Ping pong (tenis de mesa) — canal premium independiente. Se configura por
-# entorno (Railway). Mientras valga 0, el plan queda OCULTO en el menú y
-# get_plan_channels no devuelve canal (no se intenta invitar/expulsar).
-CANAL_PINPON_ID  = int(os.getenv("CANAL_PINPON_ID", "0") or "0")
+# Ping pong (tenis de mesa) — canal premium independiente. Por defecto apunta
+# al canal OFICIAL de ping pong del bot de picks (-1004259041662); overridable
+# por entorno. Si valiera 0, el plan quedaría OCULTO en el menú y
+# get_plan_channels no devolvería canal (no se intenta invitar/expulsar).
+# NOTA: el bot de pagos debe ser ADMIN de ese canal (invitar y expulsar).
+CANAL_PINPON_ID  = int(os.getenv("CANAL_PINPON_ID", "-1004259041662") or "0")
 
 LINK_FREE = "https://t.me/+WhIkP2PstS1kMDVk"
 
