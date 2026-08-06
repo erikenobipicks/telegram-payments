@@ -28,6 +28,7 @@ from config import (
     BIZUM,
     CANAL_CORNERS_ID,
     CANAL_GOLES_ID,
+    CANAL_PINPON_ID,
     CANAL_PRE_ID,
     CHECK_EXPIRATIONS_EVERY_SECONDS,
     DATABASE_URL,
@@ -41,6 +42,7 @@ from config import (
     PRECIO_COMBO,
     PRECIO_CORNERS,
     PRECIO_GOLES,
+    PRECIO_PINPON,
     PRECIO_PRE,
     RATE_LIMITS,
     REEXPULSION_RETRY_DAYS,
@@ -50,10 +52,12 @@ from config import (
     STRIPE_COMBO,
     STRIPE_CORNERS,
     STRIPE_GOLES,
+    STRIPE_PINPON,
     STRIPE_PRE,
     TIMEZONE,
     TOKEN,
     TRIAL_DAYS,
+    TRIAL_PLANS,
     _MESES_ES,
 )
 from keyboards import (
@@ -714,6 +718,10 @@ def get_plan_channels(plan: str) -> list[tuple[str, int]]:
         return [("🚩 CORNERS", CANAL_CORNERS_ID)]
     if plan == "pre":
         return [("📊 PREPARTIDO", CANAL_PRE_ID)]
+    if plan == "pinpon":
+        # Sin canal configurado no se devuelve nada: evita invitar/expulsar
+        # sobre un chat_id inválido (0) mientras el plan está a medio activar.
+        return [("🏓 PING PONG", CANAL_PINPON_ID)] if CANAL_PINPON_ID else []
     if plan == "combo":
         return [("⚽ GOLES", CANAL_GOLES_ID), ("🚩 CORNERS", CANAL_CORNERS_ID)]
     if plan == "total":
@@ -2050,18 +2058,20 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     plan = query.data
 
     # Registrar en pendientes cuando el usuario elige un plan de pago
-    if plan in ("goles", "corners", "combo", "pre"):
+    if plan in ("goles", "corners", "combo", "pre", "pinpon"):
         await _run_db(upsert_pending_payment, user.id, user.username, user.full_name, plan)
 
     if plan == "menu":
+        pp_linea = "🏓 *PING PONG* — Tenis de mesa en directo\n" if CANAL_PINPON_ID else ""
         await query.edit_message_text(
             "🔥 *Erikenobi Picks Premium*\n\n"
-            "Alertas de fútbol en tiempo real con análisis estadístico avanzado\\.\n\n"
+            "Alertas en tiempo real con análisis estadístico avanzado\\.\n\n"
             "⚽ *GOLES* — Alertas de gol en directo\n"
             "🚩 *CORNERS* — Mercados de córners en vivo\n"
             "📊 *PREPARTIDO* — Análisis manual Over 2\\.5 FT\n"
-            "🔥 *COMBO* — GOLES \\+ CORNERS\n\n"
-            "Elige un plan o consulta la información:",
+            "🔥 *COMBO* — GOLES \\+ CORNERS\n"
+            f"{pp_linea}"
+            "\nElige un plan o consulta la información:",
             reply_markup=menu_markup(),
             parse_mode="MarkdownV2",
         )
@@ -2096,7 +2106,10 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "Análisis manual Over 2\\.5 FT\\. Canal independiente\\.\n\n"
             "🔥 *COMBO — 30€/mes*\n"
             "Acceso completo a GOLES \\+ CORNERS\\.\n\n"
-            "📲 *Métodos de pago*\n"
+            + ("🏓 *PING PONG — 50€/mes*\n"
+               "Picks de tenis de mesa en directo con el método ping pong\\. "
+               "Canal independiente\\.\n\n" if CANAL_PINPON_ID else "")
+            + "📲 *Métodos de pago*\n"
             "Stripe · PayPal · Bizum · Revolut\n\n"
             "🔑 *Activación*\n"
             "Tras pagar, envía la captura del comprobante en este chat\\. "
@@ -2264,9 +2277,26 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
+    # ── Plan PING PONG ──────────────────────────────────────────────────
+    if plan == "pinpon":
+        await query.edit_message_text(
+            "🏓 *PLAN PING PONG*\n\n"
+            f"💰 Precio: *{PRECIO_PINPON}/mes*\n\n"
+            "✅ Incluye:\n"
+            "• Picks de tenis de mesa en directo con el método ping pong\n"
+            "• Avisos de cada franja y seguimiento en vivo\n"
+            "• Registro de resultados y unidades del día\n\n"
+            "📌 Canal premium independiente del resto de planes\\."
+            + _GUIA_PAGO + "\n\n"
+            "Selecciona tu método de pago:",
+            reply_markup=pago_markup("pinpon"),
+            parse_mode="MarkdownV2",
+        )
+        return
+
     if plan.startswith("trial:"):
         _, plan_real = plan.split(":", 1)
-        if plan_real not in ("goles", "corners", "combo", "pre"):
+        if plan_real not in TRIAL_PLANS:
             await query.edit_message_text(
                 "Plan no válido para la prueba.",
                 reply_markup=volver_markup(),
@@ -2351,7 +2381,8 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if plan.startswith("bizum:"):
         _, plan_real = plan.split(":", 1)
-        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre": PRECIO_PRE}
+        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO,
+                    "pre": PRECIO_PRE, "pinpon": PRECIO_PINPON}
         importe  = importes.get(plan_real, "consultar")
         # Formatear número Bizum limpio
         bizum_fmt = BIZUM.replace("+34", "\\+34")
@@ -2374,7 +2405,8 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if plan.startswith("revolut:"):
         _, plan_real = plan.split(":", 1)
-        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre": PRECIO_PRE}
+        importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO,
+                    "pre": PRECIO_PRE, "pinpon": PRECIO_PINPON}
         importe  = importes.get(plan_real, "consultar")
         await query.edit_message_text(
             f"🟣 *Pago por Revolut*\n\n"
@@ -2857,7 +2889,7 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             _, plan, user_id = parts
             user_id_int = int(user_id)
 
-            if plan not in ("goles", "corners", "combo", "pre"):
+            if plan not in ("goles", "corners", "combo", "pre", "pinpon"):
                 await query.edit_message_text("Plan no válido.")
                 return
 
@@ -2969,7 +3001,7 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     plan = context.args[1].lower()
-    if plan not in ("goles", "corners", "combo", "pre", "total"):
+    if plan not in ("goles", "corners", "combo", "pre", "pinpon", "total"):
         await update.message.reply_text("Plan no válido. Usa: goles, corners, pre, combo o total")
         return
 
@@ -3711,7 +3743,7 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     plan_anterior = existing["plan"] if existing else None
     plan          = plan_nuevo or plan_anterior
-    if plan not in ("goles", "corners", "combo", "pre", "total"):
+    if plan not in ("goles", "corners", "combo", "pre", "pinpon", "total"):
         await update.message.reply_text("Plan no válido. Usa: goles, corners, pre, combo o total")
         return
 
@@ -3875,7 +3907,7 @@ async def regalar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     plan = context.args[1].lower()
-    if plan not in ("goles", "corners", "combo", "pre", "total"):
+    if plan not in ("goles", "corners", "combo", "pre", "pinpon", "total"):
         await update.message.reply_text(
             "Plan no válido. Usa: goles, corners, pre, combo o total"
         )
@@ -4227,8 +4259,10 @@ def _instrucciones_renovacion(plan: str) -> str:
             "Habla con @erikenobi si quieres renovarlo."
         )
 
-    precios  = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO, "pre": PRECIO_PRE}
-    stripes  = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO, "pre": STRIPE_PRE}
+    precios  = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO,
+                "pre": PRECIO_PRE, "pinpon": PRECIO_PINPON}
+    stripes  = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO,
+                "pre": STRIPE_PRE, "pinpon": STRIPE_PINPON}
 
     precio     = precios.get(plan, "20€")
     stripe_url = stripes.get(plan, "")

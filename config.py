@@ -22,6 +22,13 @@ CANAL_CORNERS_ID = -1003895151594
 CANAL_GOLES_ID   = -1003818905455
 CANAL_PRE_ID     = -1003837149453   # Over 2.5 FT prepartido — análisis manual
 
+# Ping pong (tenis de mesa) — canal premium independiente. Por defecto apunta
+# al canal OFICIAL de ping pong del bot de picks (-1004259041662); overridable
+# por entorno. Si valiera 0, el plan quedaría OCULTO en el menú y
+# get_plan_channels no devolvería canal (no se intenta invitar/expulsar).
+# NOTA: el bot de pagos debe ser ADMIN de ese canal (invitar y expulsar).
+CANAL_PINPON_ID  = int(os.getenv("CANAL_PINPON_ID", "-1004259041662") or "0")
+
 LINK_FREE = "https://t.me/+WhIkP2PstS1kMDVk"
 
 # ── Precios y métodos de pago ───────────────────────────────────────────────
@@ -29,6 +36,11 @@ PRECIO_GOLES   = "20€"
 PRECIO_CORNERS = "20€"
 PRECIO_COMBO   = "30€"
 PRECIO_PRE     = "20€"
+PRECIO_PINPON  = "50€"
+
+# Planes que ofrecen prueba gratis. Ping pong (50€) va directo a pago; para
+# activarle prueba, basta con añadir "pinpon" a esta tupla.
+TRIAL_PLANS = ("goles", "corners", "combo", "pre")
 
 BIZUM        = "+34660426660"
 PAYPAL_LINK  = "https://paypal.me/erikenobi"
@@ -38,6 +50,9 @@ STRIPE_GOLES   = "https://buy.stripe.com/aFa8wObuQ9MbdgA00x08g01"
 STRIPE_CORNERS = "https://buy.stripe.com/bJe3cugPaf6vdgA5kR08g02"
 STRIPE_COMBO   = "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
 STRIPE_PRE     = "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
+# Enlace de pago de Ping Pong (50€). Overridable por entorno; si quedara vacío,
+# el bot no muestra el botón de tarjeta (PayPal/Bizum/Revolut siguen disponibles).
+STRIPE_PINPON  = os.getenv("STRIPE_PINPON", "https://buy.stripe.com/6oUcN4gPa2jJb8s8x308g05")
 
 # ── Suscripciones / trials / accesos ────────────────────────────────────────
 PLAN_DAYS    = 30
