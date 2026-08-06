@@ -50,9 +50,9 @@ STRIPE_GOLES   = "https://buy.stripe.com/aFa8wObuQ9MbdgA00x08g01"
 STRIPE_CORNERS = "https://buy.stripe.com/bJe3cugPaf6vdgA5kR08g02"
 STRIPE_COMBO   = "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
 STRIPE_PRE     = "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
-# Enlace de pago de Ping Pong (50€). Se configura por entorno; si queda vacío,
+# Enlace de pago de Ping Pong (50€). Overridable por entorno; si quedara vacío,
 # el bot no muestra el botón de tarjeta (PayPal/Bizum/Revolut siguen disponibles).
-STRIPE_PINPON  = os.getenv("STRIPE_PINPON", "")
+STRIPE_PINPON  = os.getenv("STRIPE_PINPON", "https://buy.stripe.com/6oUcN4gPa2jJb8s8x308g05")
 
 # ── Suscripciones / trials / accesos ────────────────────────────────────────
 PLAN_DAYS    = 30
