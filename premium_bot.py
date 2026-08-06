@@ -454,6 +454,124 @@ def get_stats_reales() -> dict | None:
         return cached
 
 
+# ── Estadísticas del método ping pong (tabla pinpon_resultados) ──────────────
+_stats_pinpon_cache: dict = {"data": None, "ts": 0.0}
+
+# Métricas agregadas mirror de resumen_pinpon() del bot de picks:
+#   jugadas  = E1/E3/FALLO (ANULADO y AJUSTE no cuentan como jugada)
+#   aciertos = E1 + E3
+#   unidades = suma de E1/E3/FALLO + AJUSTE (saldo/ajuste manual)
+#   staked   = suma de E1/E3/FALLO   ·   roi = unidades/staked
+# Excluye los resultados internos (nota = 'interno'), que no son públicos.
+_PINPON_STATS_SQL = """
+    SELECT
+        COUNT(*) FILTER (WHERE resultado IN ('E1','E3','FALLO'))                            AS jugadas,
+        COUNT(*) FILTER (WHERE resultado IN ('E1','E3'))                                    AS aciertos,
+        COALESCE(SUM(staked)   FILTER (WHERE resultado IN ('E1','E3','FALLO')), 0)          AS staked,
+        COALESCE(SUM(unidades) FILTER (WHERE resultado IN ('E1','E3','FALLO','AJUSTE')), 0) AS unidades
+    FROM pinpon_resultados
+    WHERE jugador IS NOT NULL
+      AND (nota IS NULL OR lower(trim(nota)) <> 'interno')
+      {mes_filtro}
+"""
+
+
+def _pinpon_metricas(row: dict | None) -> dict:
+    row = row or {}
+    jugadas  = int(row.get("jugadas") or 0)
+    aciertos = int(row.get("aciertos") or 0)
+    staked   = float(row.get("staked") or 0.0)
+    unidades = float(row.get("unidades") or 0.0)
+    return {
+        "jugadas": jugadas,
+        "aciertos": aciertos,
+        "pct": round(aciertos / jugadas * 100, 1) if jugadas else 0.0,
+        "unidades": round(unidades, 2),
+        "roi": round(unidades / staked * 100, 1) if staked else 0.0,
+    }
+
+
+def get_stats_pinpon() -> dict | None:
+    """
+    Estadísticas reales del método ping pong (global + mes en curso), leídas en
+    vivo de la picks DB con caché TTL. Devuelve {'global', 'mes', 'mes_label'}
+    o None si no hay datos ni conexión.
+    """
+    now = monotonic()
+    cached = _stats_pinpon_cache["data"]
+    if cached is not None and (now - _stats_pinpon_cache["ts"]) < _STATS_CACHE_TTL_SECONDS:
+        return cached
+
+    conn = get_picks_conn()
+    if not conn:
+        return cached
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(_PINPON_STATS_SQL.format(mes_filtro=""))
+                g = cur.fetchone()
+                cur.execute(_PINPON_STATS_SQL.format(
+                    mes_filtro="AND left(fecha, 7) = "
+                    "to_char((CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Madrid'), 'YYYY-MM')"
+                ))
+                m = cur.fetchone()
+                cur.execute("SELECT to_char("
+                            "(CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Madrid'), 'YYYY-MM') AS mes")
+                mes_label = (cur.fetchone() or {}).get("mes")
+        result = {
+            "global": _pinpon_metricas(g),
+            "mes": _pinpon_metricas(m),
+            "mes_label": mes_label,
+        }
+        _stats_pinpon_cache["data"] = result
+        _stats_pinpon_cache["ts"] = now
+        return result
+    except Exception as e:
+        logger.error(f"Error obteniendo stats de ping pong: {e}")
+        return cached
+
+
+def _pinpon_stats_hay_datos(stats: dict | None) -> bool:
+    return bool(stats and stats.get("global", {}).get("jugadas"))
+
+
+def _formatear_stats_pinpon_md(stats: dict) -> str:
+    """Bloque de stats de ping pong en Markdown (legacy) para el panel /stats."""
+    g = stats["global"]
+    m = stats["mes"]
+    lineas = [
+        "🏓 *PING PONG*",
+        f"Global: {g['jugadas']} jugadas · {g['aciertos']} aciertos ({g['pct']}%)",
+        f"Unidades: {g['unidades']:+.2f}u · Yield {g['roi']}%",
+    ]
+    if m.get("jugadas"):
+        lineas.append(
+            f"Mes {stats.get('mes_label', '')}: {m['jugadas']} jugadas · "
+            f"{m['aciertos']} aciertos ({m['pct']}%) · {m['unidades']:+.2f}u"
+        )
+    return "\n".join(lineas)
+
+
+def _v2(texto: str) -> str:
+    """Escapa un valor dinámico para inyectarlo en un mensaje MarkdownV2."""
+    out = str(texto)
+    for ch in r"_*[]()~`>#+-=|{}.!":
+        out = out.replace(ch, "\\" + ch)
+    return out
+
+
+def _pinpon_ficha_stats_v2(stats: dict) -> str:
+    """Línea de rendimiento real (MarkdownV2) para la ficha del plan ping pong."""
+    g = stats["global"]
+    pct = _v2(f"{g['pct']}%")
+    uds = _v2(f"{g['unidades']:+.2f}u")
+    yld = _v2(f"{g['roi']}%")
+    return (
+        f"📈 Rendimiento real: *{pct}* acierto · *{uds}* · Yield *{yld}*\n"
+        f"📊 Muestra: {g['jugadas']} jugadas registradas\n\n"
+    )
+
+
 def _get_strike_tipo(stats: dict | None, tipo: str) -> str | None:
     """
     Devuelve el strike del último mes para un tipo_pick ("gol" / "corner").
@@ -2128,6 +2246,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # ── Stats reales ────────────────────────────────────────────────────
     if plan == "stats":
         stats = await _run_db(get_stats_reales)
+        pp_stats = await _run_db(get_stats_pinpon)
 
         if stats and (stats.get("globales") or stats.get("ultimo_mes")):
             texto = _formatear_stats_reales(stats)
@@ -2147,6 +2266,9 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "⚠️ _Los datos en tiempo real no están disponibles en este momento. "
                 "Inténtalo más tarde._"
             )
+
+        if _pinpon_stats_hay_datos(pp_stats):
+            texto += "\n\n" + _formatear_stats_pinpon_md(pp_stats)
 
         await query.edit_message_text(
             texto,
@@ -2279,9 +2401,12 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # ── Plan PING PONG ──────────────────────────────────────────────────
     if plan == "pinpon":
+        pp_stats = await _run_db(get_stats_pinpon)
+        stats_linea = _pinpon_ficha_stats_v2(pp_stats) if _pinpon_stats_hay_datos(pp_stats) else ""
         await query.edit_message_text(
             "🏓 *PLAN PING PONG*\n\n"
             f"💰 Precio: *{PRECIO_PINPON}/mes*\n\n"
+            f"{stats_linea}"
             "✅ Incluye:\n"
             "• Picks de tenis de mesa en directo con el método ping pong\n"
             "• Avisos de cada franja y seguimiento en vivo\n"

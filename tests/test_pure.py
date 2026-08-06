@@ -193,6 +193,34 @@ def test_pago_markup_pinpon_es_de_pago_directo():
     assert "pinpon" not in p.TRIAL_PLANS
 
 
+def test_pinpon_metricas_calculo():
+    # jugadas = E1/E3/FALLO; aciertos = E1+E3; pct y roi derivados.
+    row = {"jugadas": 25, "aciertos": 13, "staked": 50.0, "unidades": 6.15}
+    m = p._pinpon_metricas(row)
+    assert m["jugadas"] == 25
+    assert m["aciertos"] == 13
+    assert m["pct"] == 52.0
+    assert m["unidades"] == 6.15
+    assert m["roi"] == 12.3  # 6.15 / 50 * 100
+
+
+def test_pinpon_metricas_sin_jugadas_no_divide_por_cero():
+    m = p._pinpon_metricas({"jugadas": 0, "aciertos": 0, "staked": 0, "unidades": 0})
+    assert m["pct"] == 0.0 and m["roi"] == 0.0
+
+
+def test_pinpon_stats_hay_datos():
+    assert p._pinpon_stats_hay_datos({"global": {"jugadas": 3}}) is True
+    assert p._pinpon_stats_hay_datos({"global": {"jugadas": 0}}) is False
+    assert p._pinpon_stats_hay_datos(None) is False
+
+
+def test_v2_escapa_markdown():
+    # Los valores dinámicos (%, +, ., -) deben quedar escapados para MarkdownV2.
+    assert p._v2("+38.31u") == "\\+38\\.31u"
+    assert p._v2("52.0%") == "52\\.0%"
+
+
 def test_get_plan_channels_pinpon():
     # Con CANAL_PINPON_ID configurado (por defecto el canal OFICIAL), el plan
     # devuelve exactamente ese canal. Si estuviera a 0, devolvería [] (guard
