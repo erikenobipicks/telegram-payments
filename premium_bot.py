@@ -1713,8 +1713,9 @@ def registrar_referido(referred_user_id: int, referrer_user_id: int) -> bool:
     """
     Registra que `referred_user_id` viene recomendado por `referrer_user_id`.
     Solo si: no es autorreferencia, el recomendado no estaba ya referido y aún
-    no es un suscriptor (no se puede 'referir' a alguien que ya está en users).
-    Devuelve True si se registró el referido.
+    NO es cliente de pago (no ha tenido ningún pago aprobado). Un usuario que
+    solo ha hecho la prueba SÍ puede registrarse: la recompensa salta después,
+    en su primer pago. Devuelve True si se registró el referido.
     """
     if referred_user_id == referrer_user_id:
         return False
@@ -1722,11 +1723,12 @@ def registrar_referido(referred_user_id: int, referrer_user_id: int) -> bool:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT 1 FROM users WHERE telegram_user_id = %s",
+                    "SELECT 1 FROM audit_log "
+                    "WHERE target_user_id = %s AND event = 'aprobacion' LIMIT 1",
                     (referred_user_id,),
                 )
                 if cur.fetchone():
-                    return False  # ya es/ha sido suscriptor: no aplica
+                    return False  # ya ha pagado alguna vez: no aplica
                 cur.execute(
                     """
                     INSERT INTO referrals (referred_user_id, referrer_user_id)
@@ -1880,9 +1882,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     logger.error(f"Error avisando nuevo usuario al admin {admin_id}: {e}")
 
         # Deep link de referido: /start ref<referrer_id> (legado) o
-        # '..__ref-<referrer_id>' (nuevo). Solo cuenta si el usuario es nuevo
-        # (no farmear referidos con cuentas ya existentes).
-        if es_nuevo and origen.get("referral_code"):
+        # '..__ref-<referrer_id>' (nuevo). Se acepta aunque no sea su primer
+        # /start (p.ej. si ya había hecho la prueba): registrar_referido solo lo
+        # rechaza si el recomendado YA es cliente de pago o ya estaba referido.
+        if origen.get("referral_code"):
             try:
                 referrer_id = int(origen["referral_code"])
             except (ValueError, TypeError):
