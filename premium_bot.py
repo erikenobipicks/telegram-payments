@@ -1488,8 +1488,8 @@ def aprobar_pago_tx(user_id: int, plan: str, actor_id: int, via: str):
     pendiente (idempotencia: una segunda aprobación no extiende nada).
 
     Si el usuario vino recomendado y aún no se ha recompensado el referido,
-    en la MISMA transacción: aplica el 2x1 al recomendado (días dobles),
-    suma REFERIDOR_DIAS al referidor y marca el referido como recompensado.
+    en la MISMA transacción: suma REFERIDOR_DIAS al referidor y marca el
+    referido como recompensado. El recomendado NO recibe días extra.
     `referido_info` es None si no había referido pendiente, o un dict con
     {referrer_id, referrer_record} para que el llamador avise por Telegram.
     """
@@ -1507,7 +1507,7 @@ def aprobar_pago_tx(user_id: int, plan: str, actor_id: int, via: str):
             row = cur.fetchone()
             plan_anterior = row["plan"] if row else None
 
-            # ¿Tiene un referido pendiente? (su primer pago activa el 2x1)
+            # ¿Tiene un referido pendiente? (su primer pago premia al referidor)
             cur.execute(
                 "SELECT referrer_user_id FROM referrals "
                 "WHERE referred_user_id = %s AND estado = 'pendiente'",
@@ -1515,6 +1515,8 @@ def aprobar_pago_tx(user_id: int, plan: str, actor_id: int, via: str):
             )
             ref_row = cur.fetchone()
             es_referido = ref_row is not None
+            # El recomendado ya no recibe días extra (REFERIDO_MULTIPLICADOR=1);
+            # el premio del referido va solo para quien recomienda (REFERIDOR_DIAS).
             dias = PLAN_DAYS * REFERIDO_MULTIPLICADOR if es_referido else PLAN_DAYS
 
             record = _extend_user_cur(
@@ -1525,7 +1527,7 @@ def aprobar_pago_tx(user_id: int, plan: str, actor_id: int, via: str):
 
             detalle = via if not plan_anterior else f"{via} plan_anterior={plan_anterior}"
             if es_referido:
-                detalle += f" | 2x1 referido ({dias}d)"
+                detalle += f" | recomendado ({dias}d, sin extra)"
             _registrar_evento_cur(
                 cur, "aprobacion", target_user_id=user_id, actor_id=actor_id,
                 actor_tipo="admin", plan=plan, fecha_fin=record["fecha_fin"],
@@ -1915,8 +1917,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
     bonus_referido = (
-        "🎁 *¡Vienes recomendado!* Tu primera suscripción es *2x1*: "
-        "paga 1 mes y llévate 2.\n\n" if vino_referido else ""
+        "🤝 *¡Vienes recomendado!* Bienvenido de parte de quien te ha invitado.\n\n"
+        if vino_referido else ""
     )
     banner_trial = (
         f"🎁 *Prueba gratis {TRIAL_DAYS} días*: elige un plan y activa tu prueba "
@@ -1969,15 +1971,14 @@ async def _panel_referido(user_id: int):
     texto = (
         "🎁 *Invita y gana*\n\n"
         "Comparte tu enlace personal. Cuando un amigo *nuevo* se suscriba:\n"
-        f"• Tú ganas *{REFERIDOR_DIAS} días* gratis.\n"
-        "• Tu amigo recibe *2x1* en su primera suscripción (paga 1 mes, lleva 2).\n\n"
+        f"• Tú ganas *{REFERIDOR_DIAS} días* gratis.\n\n"
         "🔗 Tu enlace (tócalo para copiarlo):\n"
         f"`{link}`\n\n"
         f"👥 Invitados: *{stats['total']}*  ·  💰 Suscritos: *{stats['recompensados']}*"
     )
     share_text = (
-        "Te invito a Erikenobi Picks Premium: con mi enlace tu primera "
-        "suscripción es 2x1 (paga 1 mes y llévate 2)."
+        "Te invito a Erikenobi Picks Premium: apuestas con método y "
+        "resultados reales. Entra con mi enlace 👇"
     )
     share_url = (
         "https://t.me/share/url?url=" + quote(link, safe="")
@@ -2056,7 +2057,7 @@ async def promo_referidos_callback(update: Update, context: ContextTypes.DEFAULT
             texto, markup = await _panel_referido(uid)
             await context.bot.send_message(
                 chat_id=uid,
-                text="🎁 *¡Novedad! Gana 1 mes gratis*\n\n" + texto,
+                text=f"🎁 *¡Gana {REFERIDOR_DIAS} días gratis por invitar!*\n\n" + texto,
                 reply_markup=markup,
                 parse_mode="Markdown",
             )
@@ -2441,7 +2442,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if await _run_db(has_used_trial, user.id):
             await query.edit_message_text(
                 "🎁 *Prueba gratuita ya usada*\n\n"
-                "Solo se permite una prueba de 3 días por usuario y ya has reclamado la tuya\\.\n\n"
+                f"Solo se permite una prueba de {TRIAL_DAYS} días por usuario y ya has reclamado la tuya\\.\n\n"
                 "Si quieres seguir disfrutando del servicio, elige un plan en el menú\\.",
                 reply_markup=volver_markup(),
                 parse_mode="MarkdownV2",
@@ -2963,7 +2964,7 @@ async def recibir_comprobante(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ==============================
 
 async def _notificar_recompensa_referido(context: ContextTypes.DEFAULT_TYPE, referido_info) -> None:
-    """Avisa al referidor (y al admin) de su mes gratis. No-op si no hubo referido."""
+    """Avisa al referidor (y al admin) de sus días gratis. No-op si no hubo referido."""
     if not referido_info:
         return
     referrer_id = referido_info["referrer_id"]
@@ -3038,10 +3039,7 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             # expulsar de los canales que ya no le corresponden.
             await _expulsar_canales_obsoletos(context, user_id_int, plan_anterior, plan)
 
-            bonus_txt = (
-                "\n🎁 *Incluye tu 2x1 por venir recomendado* (¡el doble de tiempo!)."
-                if referido_info else ""
-            )
+            bonus_txt = ""
             try:
                 await context.bot.send_message(
                     chat_id=user_id_int,
@@ -3062,8 +3060,9 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await _notificar_recompensa_referido(context, referido_info)
 
             extra_admin = (
-                f"\n🎁 Era un referido: 2x1 aplicado y +{REFERIDOR_DIAS}d al referidor "
-                f"{referido_info['referrer_id']}." if referido_info else ""
+                f"\n🎁 Vino recomendado: +{REFERIDOR_DIAS}d al referidor "
+                f"{referido_info['referrer_id']} (el recomendado no recibe extra)."
+                if referido_info else ""
             )
             await query.edit_message_text(
                 f"✅ Usuario {user_id_int} aprobado para {plan.upper()}.\n"
@@ -3156,10 +3155,7 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Si cambió de plan, expulsar de los canales que ya no le corresponden
     await _expulsar_canales_obsoletos(context, target_user_id, plan_anterior, plan)
 
-    bonus_txt = (
-        "\n🎁 *Incluye tu 2x1 por venir recomendado* (¡el doble de tiempo!)."
-        if referido_info else ""
-    )
+    bonus_txt = ""
     try:
         await context.bot.send_message(
             chat_id=target_user_id,
@@ -3176,8 +3172,8 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         await update.message.reply_text(
             f"Usuario {target_user_id} aprobado para {plan} hasta {record['fecha_fin']}."
-            + (f"\n🎁 Referido: 2x1 + {REFERIDOR_DIAS}d al referidor "
-               f"{referido_info['referrer_id']}." if referido_info else "")
+            + (f"\n🎁 Vino recomendado: +{REFERIDOR_DIAS}d al referidor "
+               f"{referido_info['referrer_id']} (recomendado sin extra)." if referido_info else "")
         )
     except Exception as e:
         await update.message.reply_text(f"Error avisando al usuario: {e}")

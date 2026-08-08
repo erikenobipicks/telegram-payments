@@ -183,14 +183,14 @@ def test_admin_approval_markup_incluye_pinpon():
     assert "approve:pinpon:999" in cbs
 
 
-def test_pago_markup_pinpon_es_de_pago_directo():
-    # Ping pong (50€) es un plan de pago sin prueba gratis: métodos manuales
-    # presentes, pero sin botón de trial.
+def test_pago_markup_pinpon_ofrece_prueba():
+    # Ping pong (50€) ahora ofrece prueba gratis: métodos manuales presentes
+    # y botón de trial disponible.
     cbs = _callbacks(p.pago_markup("pinpon"))
     assert "bizum:pinpon" in cbs
     assert "revolut:pinpon" in cbs
-    assert "trial:pinpon" not in cbs
-    assert "pinpon" not in p.TRIAL_PLANS
+    assert "trial:pinpon" in cbs
+    assert "pinpon" in p.TRIAL_PLANS
 
 
 def test_pinpon_metricas_calculo():
@@ -325,8 +325,9 @@ def test_parse_start_tokens_invalidos_no_rompen():
     assert r["intent"] == "trial_7d"
 
 
-def test_trial_days_por_defecto_7():
-    # El default debe ser 7 (objetivo del funnel), salvo override por entorno.
+def test_trial_days_por_defecto_3():
+    # El default debe ser 3 (3 días bastan para un servicio con ~90% de
+    # acierto), salvo override por entorno.
     import os
     if "TRIAL_DAYS" not in os.environ:
-        assert p.TRIAL_DAYS == 7
+        assert p.TRIAL_DAYS == 3
