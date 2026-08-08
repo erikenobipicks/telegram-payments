@@ -38,9 +38,9 @@ PRECIO_COMBO   = "30€"
 PRECIO_PRE     = "20€"
 PRECIO_PINPON  = "50€"
 
-# Planes que ofrecen prueba gratis. Ping pong (50€) va directo a pago; para
-# activarle prueba, basta con añadir "pinpon" a esta tupla.
-TRIAL_PLANS = ("goles", "corners", "combo", "pre")
+# Planes que ofrecen prueba gratis. Ping pong (50€) también ofrece prueba:
+# 3 días son más que suficientes para un método con ~90% de acierto.
+TRIAL_PLANS = ("goles", "corners", "combo", "pre", "pinpon")
 
 BIZUM        = "+34660426660"
 PAYPAL_LINK  = "https://paypal.me/erikenobi"
@@ -56,15 +56,16 @@ STRIPE_PINPON  = os.getenv("STRIPE_PINPON", "https://buy.stripe.com/6oUcN4gPa2jJ
 
 # ── Suscripciones / trials / accesos ────────────────────────────────────────
 PLAN_DAYS    = 30
-# Duración de la prueba gratuita. Parametrizable por entorno (default 7 días).
+# Duración de la prueba gratuita. Parametrizable por entorno (default 3 días).
 # Solo afecta a trials NUEVOS: los ya activos conservan su fecha_fin.
-TRIAL_DAYS   = int(os.getenv("TRIAL_DAYS", "7"))
+TRIAL_DAYS   = int(os.getenv("TRIAL_DAYS", "3"))
 INVITE_EXPIRY_HOURS = 1
 
-# Referidos: el referidor gana REFERIDOR_DIAS gratis y el recomendado recibe
-# 2x1 (REFERIDO_MULTIPLICADOR × los días normales) en su primer pago.
-REFERIDOR_DIAS = 30
-REFERIDO_MULTIPLICADOR = 2
+# Referidos: el referidor gana REFERIDOR_DIAS gratis por cada amigo que se
+# suscriba. El recomendado NO recibe días extra (multiplicador 1): se regalaba
+# demasiado en un servicio con ~90% de acierto.
+REFERIDOR_DIAS = 15
+REFERIDO_MULTIPLICADOR = 1
 
 # Cada hora: reduce a ≤1h la ventana de acceso residual de un usuario ya
 # caducado (antes 12h). La expulsión es idempotente y, gracias al flag
