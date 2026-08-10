@@ -2751,16 +2751,23 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
             "Usuario %s alcanzó el límite de generación de enlaces (%s)",
             user.id, MAX_GENERACIONES_ACCESO,
         )
+        _nombre = user.full_name or "(sin nombre)"
+        _usuario = f"@{user.username}" if user.username else "(sin username)"
+        _aviso_txt = (
+            f"⚠️ No consigue entrar y agotó las generaciones de enlace.\n\n"
+            f"👤 {_nombre} · {_usuario}\n"
+            f"ID: {user.id}\n"
+            f"Plan: {plan}\n\n"
+            "Lo he desbaneado por si acaso. Pulsa el botón para darle un enlace "
+            f"fresco (o usa /link {user.id})."
+        )
+        _aviso_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔑 Generar enlace fresco", callback_data=f"adminlink:{user.id}"),
+        ]])
         for admin_id in ADMIN_IDS:
             try:
                 await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=(
-                        f"⚠️ El usuario {user.id} no consigue entrar "
-                        f"(plan {plan}) y agotó las generaciones de enlace.\n"
-                        f"Lo he desbaneado por si acaso. Usa /link {user.id} para "
-                        "darle un enlace fresco, o añádelo al canal manualmente."
-                    ),
+                    chat_id=admin_id, text=_aviso_txt, reply_markup=_aviso_kb,
                 )
             except Exception as e:
                 logger.error("Error avisando tope de enlaces al admin %s: %s", admin_id, e)
@@ -3234,7 +3241,8 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT telegram_user_id, plan, fecha_inicio, fecha_fin, estado,
+                    SELECT telegram_user_id, username, full_name, plan,
+                           fecha_inicio, fecha_fin, estado,
                            acceso_revocado, motivo_baja
                     FROM users WHERE telegram_user_id = %s
                     """,
@@ -3248,7 +3256,10 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Ese usuario no tiene suscripción registrada.")
         return
 
+    nombre = record.get("full_name") or "(sin nombre)"
+    usuario = f"@{record['username']}" if record.get("username") else "(sin username)"
     texto = (
+        f"👤 {nombre} · {usuario}\n"
         f"Usuario: {record['telegram_user_id']}\n"
         f"Plan: {record['plan']}\n"
         f"Inicio: {record['fecha_inicio']}\n"
@@ -3932,27 +3943,12 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"Renovación manual: user {target_user_id} | plan {plan} | hasta {record['fecha_fin']}")
 
 
-async def link_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _link_admin_core(context, target_user_id: int) -> str:
     """
-    Genera un invite link nuevo (1 uso, 1h) para un usuario con sub activa.
-    Útil para reenviar el acceso por DM/WhatsApp si el original caducó o
-    el usuario perdió el botón.
-    Uso: /link user_id
+    Genera enlaces de acceso frescos para un usuario con sub activa y devuelve
+    el texto de respuesta (Markdown). Compartido por /link y el botón del aviso
+    de tope de generaciones.
     """
-    if not _check_admin(update):
-        await update.message.reply_text("No tienes permisos.")
-        return
-
-    if len(context.args) < 1:
-        await update.message.reply_text("Uso: /link user_id")
-        return
-
-    try:
-        target_user_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("El user_id no es válido.")
-        return
-
     def _q():
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -3963,43 +3959,70 @@ async def link_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 return cur.fetchone()
 
     row = await _run_db(_q)
-
     if not row:
-        await update.message.reply_text(
-            f"Usuario {target_user_id} no tiene suscripción registrada. "
-            "Usa /renovar user_id plan para darle acceso."
-        )
-        return
-
+        return (f"Usuario {target_user_id} no tiene suscripción registrada. "
+                "Usa /renovar user_id plan para darle acceso.")
     if row["estado"] != "activo":
-        await update.message.reply_text(
-            f"⚠️ Usuario {target_user_id} no está activo (estado={row['estado']}). "
-            "Usa /renovar user_id [plan] primero."
-        )
-        return
+        return (f"⚠️ Usuario {target_user_id} no está activo (estado={row['estado']}). "
+                "Usa /renovar user_id [plan] primero.")
 
     plan = row["plan"]
     try:
         enlaces = await generar_enlaces_acceso(context, plan, user_id=target_user_id)
     except Exception as e:
         logger.error("Error generando enlaces en /link para %s: %s", target_user_id, e)
-        await update.message.reply_text(f"Error generando enlaces: {e}")
-        return
-
+        return f"Error generando enlaces: {e}"
     if not enlaces:
-        await update.message.reply_text(
-            f"No hay canales asociados al plan '{plan}'. Comprueba la configuración."
-        )
-        return
+        return f"No hay canales asociados al plan '{plan}'. Comprueba la configuración."
 
     respuesta = (
         f"🔑 Enlaces para usuario {target_user_id} "
         f"({plan.upper()}, hasta {row['fecha_fin']})\n"
-        "Cada enlace es de *1 uso* y dura *1 hora*:\n"
+        f"Cada enlace es de *1 uso* y dura *{INVITE_EXPIRY_HOURS}h*:\n"
     )
     for titulo, link in enlaces:
         respuesta += f"\n{titulo}: {link}"
-    await update.message.reply_text(respuesta, parse_mode="Markdown")
+    return respuesta
+
+
+async def link_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Genera un invite link nuevo para un usuario con sub activa. Útil para
+    reenviar el acceso por DM/WhatsApp si el original caducó.
+    Uso: /link user_id
+    """
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+    if len(context.args) < 1:
+        await update.message.reply_text("Uso: /link user_id")
+        return
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("El user_id no es válido.")
+        return
+    texto = await _link_admin_core(context, target_user_id)
+    await update.message.reply_text(texto, parse_mode="Markdown")
+
+
+async def adminlink_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Botón '🔑 Generar enlace fresco' del aviso de tope de generaciones."""
+    query = update.callback_query
+    if not query:
+        return
+    if not query.from_user or query.from_user.id not in ADMIN_IDS:
+        await query.answer("No autorizado.", show_alert=True)
+        return
+    try:
+        target_user_id = int((query.data or "").split(":", 1)[1])
+    except (ValueError, IndexError):
+        await query.answer()
+        return
+    await query.answer("Generando enlace…")
+    texto = await _link_admin_core(context, target_user_id)
+    chat_id = query.message.chat_id if query.message else query.from_user.id
+    await context.bot.send_message(chat_id=chat_id, text=texto, parse_mode="Markdown")
 
 
 async def regalar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4765,6 +4788,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(encuesta_callback, pattern=r"^enc:"))
     app.add_handler(CallbackQueryHandler(borrar_datos_callback, pattern=r"^borrar:"))
     app.add_handler(CallbackQueryHandler(promo_referidos_callback, pattern=r"^promoref:"))
+    app.add_handler(CallbackQueryHandler(adminlink_callback, pattern=r"^adminlink:"))
     app.add_handler(CallbackQueryHandler(seleccionar_plan))
 
     # Auto-aprobación de solicitudes de unión a los canales (enlaces con

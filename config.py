@@ -59,7 +59,9 @@ PLAN_DAYS    = 30
 # Duración de la prueba gratuita. Parametrizable por entorno (default 3 días).
 # Solo afecta a trials NUEVOS: los ya activos conservan su fecha_fin.
 TRIAL_DAYS   = int(os.getenv("TRIAL_DAYS", "3"))
-INVITE_EXPIRY_HOURS = 1
+# Validez del enlace de invitación (horas). Antes 1h — demasiado corto: si el
+# usuario no lo abría a tiempo, caducaba y quemaba intentos. Ahora 24h.
+INVITE_EXPIRY_HOURS = int(os.getenv("INVITE_EXPIRY_HOURS", "24"))
 
 # Referidos: el referidor gana REFERIDOR_DIAS gratis por cada amigo que se
 # suscriba. El recomendado NO recibe días extra (multiplicador 1): se regalaba
@@ -78,7 +80,7 @@ REEXPULSION_RETRY_DAYS = 7
 # Máximo de enlaces de acceso que un usuario puede auto-generar por periodo
 # de suscripción. Limita el reparto de enlaces a terceros. El contador se
 # reinicia con cada aprobación/renovación/regalo (registrar_acceso_pendiente).
-MAX_GENERACIONES_ACCESO = 3
+MAX_GENERACIONES_ACCESO = int(os.getenv("MAX_GENERACIONES_ACCESO", "6"))
 
 TIMEZONE = "Europe/Madrid"
 
