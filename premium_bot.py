@@ -325,6 +325,24 @@ def init_db():
                 ON referrals (referrer_user_id);
                 """
             )
+            # Gastos del negocio (control interno). Se rellenan desde el bot
+            # (/gasto) o desde el panel privado de la web; ambos escriben aquí.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS gastos (
+                    id         BIGSERIAL PRIMARY KEY,
+                    fecha      DATE NOT NULL DEFAULT CURRENT_DATE,
+                    concepto   TEXT NOT NULL,
+                    importe    NUMERIC(10,2) NOT NULL,
+                    categoria  TEXT,
+                    creado_por TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gastos_fecha ON gastos (fecha DESC);"
+            )
     logger.info("Base de datos inicializada.")
 
 
@@ -4025,6 +4043,93 @@ async def adminlink_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await context.bot.send_message(chat_id=chat_id, text=texto, parse_mode="Markdown")
 
 
+def db_insertar_gasto(fecha, concepto: str, importe: float, categoria=None, creado_por="bot") -> int:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO gastos (fecha, concepto, importe, categoria, creado_por) "
+                "VALUES (COALESCE(%s, CURRENT_DATE), %s, %s, %s, %s) RETURNING id;",
+                (fecha, concepto, importe, categoria, creado_por),
+            )
+            return cur.fetchone()["id"]
+
+
+def db_gastos_recientes(limite: int = 15) -> list[dict]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, fecha, concepto, importe, categoria FROM gastos "
+                "ORDER BY fecha DESC, id DESC LIMIT %s;",
+                (limite,),
+            )
+            return cur.fetchall()
+
+
+def db_gastos_total_mes() -> float:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(SUM(importe), 0) AS total FROM gastos "
+                "WHERE date_trunc('month', fecha) = date_trunc('month', CURRENT_DATE);"
+            )
+            return float(cur.fetchone()["total"] or 0)
+
+
+async def gasto_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Registra un gasto del negocio. Solo admins.
+    Uso: /gasto <importe> <concepto>
+    Ejemplo: /gasto 49.90 hosting Railway
+    """
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Uso: /gasto <importe> <concepto>\nEjemplo: /gasto 49.90 hosting Railway"
+        )
+        return
+    try:
+        importe = float(context.args[0].replace(",", "."))
+    except ValueError:
+        await update.message.reply_text("El importe no es válido. Ejemplo: /gasto 49.90 hosting")
+        return
+    if importe <= 0:
+        await update.message.reply_text("El importe debe ser mayor que 0.")
+        return
+    concepto = " ".join(context.args[1:]).strip()
+    try:
+        gid = await _run_db(db_insertar_gasto, None, concepto, importe, None, "bot")
+        total = await _run_db(db_gastos_total_mes)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error guardando el gasto: {e}")
+        return
+    await update.message.reply_text(
+        f"💸 Gasto registrado (#{gid}): {importe:.2f}€ · {concepto}\n"
+        f"Total de gastos este mes: {total:.2f}€"
+    )
+
+
+async def gastos_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lista los últimos gastos y el total del mes. Solo admins."""
+    if not _check_admin(update):
+        await update.message.reply_text("No tienes permisos.")
+        return
+    filas = await _run_db(db_gastos_recientes, 15)
+    total = await _run_db(db_gastos_total_mes)
+    if not filas:
+        await update.message.reply_text(
+            "No hay gastos registrados. Añade uno con /gasto <importe> <concepto>."
+        )
+        return
+    lineas = ["💸 Últimos gastos:"]
+    for g in filas:
+        cat = f" [{g['categoria']}]" if g.get("categoria") else ""
+        lineas.append(f"#{g['id']} · {g['fecha']} · {float(g['importe']):.2f}€ · {g['concepto']}{cat}")
+    lineas.append(f"\nTotal este mes: {total:.2f}€")
+    await update.message.reply_text("\n".join(lineas))
+
+
 async def regalar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Regala una suscripción a un usuario con fecha de fin FIJA: hoy + días.
@@ -4783,6 +4888,8 @@ def main() -> None:
     app.add_handler(CommandHandler("renovar",       renovar))
     app.add_handler(CommandHandler("regalar",       regalar))
     app.add_handler(CommandHandler("link",          link_admin))
+    app.add_handler(CommandHandler("gasto",         gasto_admin))
+    app.add_handler(CommandHandler("gastos",        gastos_admin))
 
     app.add_handler(CallbackQueryHandler(admin_action_callback, pattern=r"^(approve:|reject:)"))
     app.add_handler(CallbackQueryHandler(encuesta_callback, pattern=r"^enc:"))
