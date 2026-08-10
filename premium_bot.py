@@ -2531,6 +2531,38 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
+    if plan == "que_plan":
+        botones = [
+            [InlineKeyboardButton("⚽ Goles", callback_data="goles"),
+             InlineKeyboardButton("🚩 Córners", callback_data="corners")],
+            [InlineKeyboardButton("🔥 Combo", callback_data="combo"),
+             InlineKeyboardButton("📊 Over 2.5", callback_data="pre")],
+        ]
+        if CANAL_PINPON_ID:
+            botones.append([InlineKeyboardButton("🏓 Ping Pong", callback_data="pinpon")])
+        botones.append([InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")])
+        await query.edit_message_text(
+            "🤔 *¿Qué plan me conviene?*\n\n"
+            "⚽🚩 *Goles y Córners* — _para el que vive el directo_\n"
+            "Alertas en tiempo real cuando el partido pide gol o córner\\.\n"
+            "✅ La rentabilidad más constante del día a día\\.\n"
+            "⚠️ Toca estar pendiente del móvil durante los partidos\\.\n\n"
+            "📊 *Prepartido Over 2\\.5* — _para el que va sobrado de tiempo_\n"
+            "Recibes el pick con valor hasta 12h antes\\. Apuestas y a otra cosa\\.\n"
+            "✅ Cero directo: lo dejas puesto y te olvidas\\.\n"
+            "⚠️ Rentabilidad más contenida que el live\\.\n\n"
+            "🏓 *Ping Pong* — _lo más rentable, con horario claro_\n"
+            "El método más rentable, y sabes la hora exacta de cada pick\\.\n"
+            "✅ Altísima rentabilidad y franjas concretas: planificas cuándo estar atento\\.\n"
+            "⚠️ Es en directo \\(progresión J2/J3\\), pero conoces las horas de antemano\\.\n\n"
+            "💡 *¿Aún dudas?* Pruébalo gratis \\(7 días fútbol/Over 2\\.5, 3 días Ping Pong\\) "
+            "y decide con tus propios ojos\\.\n\n"
+            "🔞 \\+18 · juego responsable · sin promesas de ganancia\\.",
+            reply_markup=InlineKeyboardMarkup(botones),
+            parse_mode="MarkdownV2",
+        )
+        return
+
     # ── Stats reales ────────────────────────────────────────────────────
     if plan == "stats":
         stats = await _run_db(get_stats_reales)

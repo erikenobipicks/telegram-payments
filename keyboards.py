@@ -25,6 +25,7 @@ def menu_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("ℹ️ Cómo funciona", callback_data="info"),
             InlineKeyboardButton("📊 Estadísticas",  callback_data="stats"),
         ],
+        [InlineKeyboardButton("🤔 ¿Qué plan elijo?",  callback_data="que_plan")],
         [InlineKeyboardButton("📋 Guía de pago",     callback_data="guia")],
         [InlineKeyboardButton("⚽⛳ Canal FREE Goles y Córners", callback_data="free")],
         [
