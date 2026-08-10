@@ -109,11 +109,6 @@ logger = logging.getLogger(__name__)
 # Vive aquí (no en config) porque se reasigna en _post_init.
 BOT_USERNAME = os.getenv("BOT_USERNAME")
 
-# Avisos de expiración ya enviados en este proceso (evita duplicados entre
-# las dos ejecuciones diarias del job). Se pierde en reinicio, lo cual es
-# aceptable: en el peor caso se envía el aviso dos veces tras un restart.
-_avisos_enviados: set[tuple[int, str]] = set()
-
 # Rate limiting en memoria: (user_id, acción) -> timestamps monotónicos
 # recientes; se purga al vuelo. Los límites están en config.RATE_LIMITS.
 _rate_buckets: dict[tuple[int, str], list[float]] = {}
@@ -356,7 +351,56 @@ def init_db():
                 "UPDATE users SET pinpon_fecha_fin = fecha_fin "
                 "WHERE plan = 'pinpon' AND pinpon_fecha_fin IS NULL;"
             )
+            # Dedup PERSISTENTE de los avisos de expiración: evita que un
+            # reinicio/redeploy del bot vuelva a mandar el mismo aviso (antes el
+            # control era solo en memoria y se perdía en cada arranque).
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS avisos_enviados (
+                    telegram_user_id BIGINT NOT NULL,
+                    tipo             TEXT   NOT NULL,
+                    fecha_fin        TEXT   NOT NULL,
+                    sent_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (telegram_user_id, tipo, fecha_fin)
+                );
+                """
+            )
     logger.info("Base de datos inicializada.")
+
+
+def _intentar_marcar_aviso(user_id: int, tipo: str, fecha_str: str) -> bool:
+    """
+    Marca un aviso como enviado de forma PERSISTENTE. Devuelve True solo si NO
+    se había enviado antes (y por tanto hay que mandarlo). Ante error, devuelve
+    False (no enviar) para evitar spam.
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO avisos_enviados (telegram_user_id, tipo, fecha_fin) "
+                    "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING "
+                    "RETURNING telegram_user_id;",
+                    (user_id, tipo, fecha_str),
+                )
+                return cur.fetchone() is not None
+    except Exception as e:
+        logger.error("Error marcando aviso %s/%s de %s: %s", tipo, fecha_str, user_id, e)
+        return False
+
+
+async def _enviar_aviso_expiracion(context, user_id, tipo, fecha_str, texto) -> None:
+    """Envía un aviso de expiración UNA sola vez (dedup persistente) y sin la
+    previa del enlace (para que no salga la tarjeta de PayPal/Stripe)."""
+    if not await _run_db(_intentar_marcar_aviso, int(user_id), tipo, fecha_str):
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=int(user_id), text=texto, parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.error("Error enviando aviso %s a %s: %s", tipo, user_id, e)
 
 
 # ==============================
@@ -4798,74 +4842,44 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
             renovar    = _instrucciones_renovacion(record["plan"])
             es_trial   = await _run_db(es_trial_actual, user_id, record["fecha_inicio"], end_date)
 
-            # Para usuarios en trial saltamos el aviso de 3 días: lo activan
-            # y lo recibirían inmediatamente, lo que es ruido innecesario.
+            # Dedup PERSISTENTE (sobrevive reinicios) + sin previa del enlace.
+            # Los de PRUEBA solo reciben UN aviso: el del último día. Los de 3/2/1
+            # días son solo para suscripciones de PAGO.
             if days_left == 3 and not es_trial:
-                aviso_key = (user_id, "aviso_3", fecha_str)
-                if aviso_key not in _avisos_enviados:
-                    await context.bot.send_message(
-                        chat_id=int(user_id),
-                        text=(
-                            f"⏳ Tu suscripción *{plan_upper}* caduca en 3 días ({end_date}).\n"
-                            "Si quieres renovarla sin interrupciones, tienes tiempo de sobra."
-                            + renovar
-                        ),
-                        parse_mode="Markdown",
-                    )
-                    _avisos_enviados.add(aviso_key)
+                await _enviar_aviso_expiracion(
+                    context, user_id, "aviso_3", fecha_str,
+                    f"⏳ Tu suscripción *{plan_upper}* caduca en 3 días ({end_date}).\n"
+                    "Si quieres renovarla sin interrupciones, tienes tiempo de sobra."
+                    + renovar,
+                )
 
-            # Los de PRUEBA solo reciben UN aviso: el del último día (days_left==0).
-            # Los avisos de 2 y 1 día son solo para suscripciones de pago (evita
-            # saturar de mensajes a quien está en una prueba de pocos días).
             elif days_left == 2 and not es_trial:
-                aviso_key = (user_id, "aviso_2", fecha_str)
-                if aviso_key not in _avisos_enviados:
-                    await context.bot.send_message(
-                        chat_id=int(user_id),
-                        text=(
-                            f"⏳ Tu suscripción *{plan_upper}* caduca en 2 días ({end_date}).\n"
-                            "Renueva hoy para no perder el acceso."
-                            + renovar
-                        ),
-                        parse_mode="Markdown",
-                    )
-                    _avisos_enviados.add(aviso_key)
+                await _enviar_aviso_expiracion(
+                    context, user_id, "aviso_2", fecha_str,
+                    f"⏳ Tu suscripción *{plan_upper}* caduca en 2 días ({end_date}).\n"
+                    "Renueva hoy para no perder el acceso." + renovar,
+                )
 
             elif days_left == 1 and not es_trial:
-                aviso_key = (user_id, "aviso_1", fecha_str)
-                if aviso_key not in _avisos_enviados:
-                    await context.bot.send_message(
-                        chat_id=int(user_id),
-                        text=(
-                            f"⚠️ Tu suscripción *{plan_upper}* caduca *mañana* ({end_date}).\n"
-                            "Si renuevas hoy, el acceso no se interrumpe."
-                            + renovar
-                        ),
-                        parse_mode="Markdown",
-                    )
-                    _avisos_enviados.add(aviso_key)
+                await _enviar_aviso_expiracion(
+                    context, user_id, "aviso_1", fecha_str,
+                    f"⚠️ Tu suscripción *{plan_upper}* caduca *mañana* ({end_date}).\n"
+                    "Si renuevas hoy, el acceso no se interrumpe." + renovar,
+                )
 
             elif days_left == 0:
-                aviso_key = (user_id, "aviso_0", fecha_str)
-                if aviso_key not in _avisos_enviados:
-                    if es_trial:
-                        texto = (
-                            f"🎁 *Hoy es el último día* de tu prueba gratuita de *{plan_upper}* ({end_date}).\n"
-                            "Si te ha gustado y quieres seguir, elige un plan antes de medianoche:"
-                            + renovar
-                        )
-                    else:
-                        texto = (
-                            f"⚠️ Tu suscripción *{plan_upper}* caduca *hoy* ({end_date}).\n"
-                            "Es el último día — si renuevas antes de medianoche el acceso continúa."
-                            + renovar
-                        )
-                    await context.bot.send_message(
-                        chat_id=int(user_id),
-                        text=texto,
-                        parse_mode="Markdown",
+                if es_trial:
+                    texto = (
+                        f"🎁 *Último día* de tu prueba de *{plan_upper}* ({end_date}).\n"
+                        "Si te ha gustado y quieres seguir, elige un plan antes de medianoche:"
+                        + renovar
                     )
-                    _avisos_enviados.add(aviso_key)
+                else:
+                    texto = (
+                        f"⚠️ Tu suscripción *{plan_upper}* caduca *hoy* ({end_date}).\n"
+                        "Si renuevas antes de medianoche, el acceso continúa." + renovar
+                    )
+                await _enviar_aviso_expiracion(context, user_id, "aviso_0", fecha_str, texto)
 
             elif days_left < 0:
                 expulsado_ok = await expulsar_de_canales(context, int(user_id), record["plan"])
@@ -4900,6 +4914,7 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     chat_id=int(user_id),
                     text=texto,
                     parse_mode="Markdown",
+                    disable_web_page_preview=True,
                 )
                 logger.info(
                     "Suscripción caducada y usuario expulsado: %s (trial=%s, ban_ok=%s)",
