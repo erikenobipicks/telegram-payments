@@ -4814,46 +4814,33 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
                     _avisos_enviados.add(aviso_key)
 
-            elif days_left == 2:
+            # Los de PRUEBA solo reciben UN aviso: el del último día (days_left==0).
+            # Los avisos de 2 y 1 día son solo para suscripciones de pago (evita
+            # saturar de mensajes a quien está en una prueba de pocos días).
+            elif days_left == 2 and not es_trial:
                 aviso_key = (user_id, "aviso_2", fecha_str)
                 if aviso_key not in _avisos_enviados:
-                    if es_trial:
-                        texto = (
-                            f"🎁 Tu *prueba gratuita* de *{plan_upper}* caduca en 2 días ({end_date}).\n"
-                            "Si quieres seguir disfrutando del servicio, elige un plan:"
-                            + renovar
-                        )
-                    else:
-                        texto = (
+                    await context.bot.send_message(
+                        chat_id=int(user_id),
+                        text=(
                             f"⏳ Tu suscripción *{plan_upper}* caduca en 2 días ({end_date}).\n"
                             "Renueva hoy para no perder el acceso."
                             + renovar
-                        )
-                    await context.bot.send_message(
-                        chat_id=int(user_id),
-                        text=texto,
+                        ),
                         parse_mode="Markdown",
                     )
                     _avisos_enviados.add(aviso_key)
 
-            elif days_left == 1:
+            elif days_left == 1 and not es_trial:
                 aviso_key = (user_id, "aviso_1", fecha_str)
                 if aviso_key not in _avisos_enviados:
-                    if es_trial:
-                        texto = (
-                            f"🎁 Tu *prueba gratuita* de *{plan_upper}* caduca *mañana* ({end_date}).\n"
-                            "Si quieres mantener el acceso, elige un plan hoy:"
-                            + renovar
-                        )
-                    else:
-                        texto = (
+                    await context.bot.send_message(
+                        chat_id=int(user_id),
+                        text=(
                             f"⚠️ Tu suscripción *{plan_upper}* caduca *mañana* ({end_date}).\n"
                             "Si renuevas hoy, el acceso no se interrumpe."
                             + renovar
-                        )
-                    await context.bot.send_message(
-                        chat_id=int(user_id),
-                        text=texto,
+                        ),
                         parse_mode="Markdown",
                     )
                     _avisos_enviados.add(aviso_key)
