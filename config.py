@@ -60,9 +60,11 @@ STRIPE_PINPON  = os.getenv("STRIPE_PINPON", "https://buy.stripe.com/6oUcN4gPa2jJ
 
 # ── Suscripciones / trials / accesos ────────────────────────────────────────
 PLAN_DAYS    = 30
-# Duración de la prueba gratuita. Parametrizable por entorno (default 3 días).
-# Solo afecta a trials NUEVOS: los ya activos conservan su fecha_fin.
-TRIAL_DAYS   = int(os.getenv("TRIAL_DAYS", "3"))
+# Duración de la prueba gratuita POR PRODUCTO. Fútbol (goles/córners/combo/pre)
+# y Over 2.5 → 7 días; Ping Pong → 3 días. Parametrizables por entorno. Solo
+# afectan a trials NUEVOS: los ya activos conservan su fecha_fin.
+TRIAL_DAYS        = int(os.getenv("TRIAL_DAYS", "7"))
+PINPON_TRIAL_DAYS = int(os.getenv("PINPON_TRIAL_DAYS", "3"))
 # Validez del enlace de invitación (horas). Antes 1h — demasiado corto: si el
 # usuario no lo abría a tiempo, caducaba y quemaba intentos. Ahora 24h.
 INVITE_EXPIRY_HOURS = int(os.getenv("INVITE_EXPIRY_HOURS", "24"))
