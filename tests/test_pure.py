@@ -221,16 +221,28 @@ def test_v2_escapa_markdown():
     assert p._v2("52.0%") == "52\\.0%"
 
 
-def test_get_plan_channels_pinpon():
-    # Con CANAL_PINPON_ID configurado (por defecto el canal OFICIAL), el plan
-    # devuelve exactamente ese canal. Si estuviera a 0, devolvería [] (guard
-    # para no operar sobre un chat_id inválido).
-    canales = p.get_plan_channels("pinpon")
+def test_get_plan_channels_pinpon_es_addon():
+    # Ping pong ya NO es un canal de plan: es un add-on independiente, así que
+    # get_plan_channels('pinpon') devuelve [] (los flujos de fútbol lo ignoran).
+    assert p.get_plan_channels("pinpon") == []
+
+
+def test_pinpon_channels_helper():
+    # El canal de ping pong se obtiene por su helper dedicado.
+    canales = p.pinpon_channels()
     if p.CANAL_PINPON_ID:
-        assert len(canales) == 1
-        assert canales[0][1] == p.CANAL_PINPON_ID
+        assert len(canales) == 1 and canales[0][1] == p.CANAL_PINPON_ID
+        assert p.es_canal_pinpon(p.CANAL_PINPON_ID) is True
+        assert p.es_canal_pinpon(p.CANAL_GOLES_ID) is False
     else:
         assert canales == []
+
+
+def test_combo_no_incluye_pinpon():
+    # Un plan de fútbol nunca incluye el canal de ping pong (add-on aparte).
+    ids = {cid for _, cid in p.get_plan_channels("combo")}
+    if p.CANAL_PINPON_ID:
+        assert p.CANAL_PINPON_ID not in ids
 
 
 def test_volver_y_acceso_markups():
