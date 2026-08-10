@@ -343,6 +343,19 @@ def init_db():
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_gastos_fecha ON gastos (fecha DESC);"
             )
+            # Add-on de PING PONG: fecha de fin propia, INDEPENDIENTE del plan de
+            # fútbol. Así un usuario puede tener fútbol Y ping pong a la vez. El
+            # acceso al canal de ping pong se rige solo por pinpon_fecha_fin.
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS pinpon_fecha_fin DATE;")
+            cur.execute(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS pinpon_revocado BOOLEAN NOT NULL DEFAULT FALSE;"
+            )
+            # Migración segura de los usuarios que YA tenían el plan 'pinpon':
+            # se les preserva el acceso pasándolo al add-on (una sola vez).
+            cur.execute(
+                "UPDATE users SET pinpon_fecha_fin = fecha_fin "
+                "WHERE plan = 'pinpon' AND pinpon_fecha_fin IS NULL;"
+            )
     logger.info("Base de datos inicializada.")
 
 
@@ -855,9 +868,10 @@ def get_plan_channels(plan: str) -> list[tuple[str, int]]:
     if plan == "pre":
         return [("📊 PREPARTIDO", CANAL_PRE_ID)]
     if plan == "pinpon":
-        # Sin canal configurado no se devuelve nada: evita invitar/expulsar
-        # sobre un chat_id inválido (0) mientras el plan está a medio activar.
-        return [("🏓 PING PONG", CANAL_PINPON_ID)] if CANAL_PINPON_ID else []
+        # Ping pong ya NO es un canal de plan: es un add-on independiente
+        # (pinpon_fecha_fin). El acceso al canal se gestiona aparte, así que aquí
+        # no se devuelve nada (evita que los flujos de fútbol lo toquen).
+        return []
     if plan == "combo":
         return [("⚽ GOLES", CANAL_GOLES_ID), ("🚩 CORNERS", CANAL_CORNERS_ID)]
     if plan == "total":
@@ -867,6 +881,74 @@ def get_plan_channels(plan: str) -> list[tuple[str, int]]:
             ("📊 PREPARTIDO", CANAL_PRE_ID),
         ]
     return []
+
+
+# ── Add-on de PING PONG (independiente del plan de fútbol) ──────────────────
+
+def pinpon_channels() -> list[tuple[str, int]]:
+    """Canal(es) de ping pong. Su acceso se rige por el add-on pinpon_fecha_fin."""
+    return [("🏓 PING PONG", CANAL_PINPON_ID)] if CANAL_PINPON_ID else []
+
+
+def es_canal_pinpon(chat_id: int) -> bool:
+    return bool(CANAL_PINPON_ID) and chat_id == CANAL_PINPON_ID
+
+
+def _pinpon_addon_activo_cur(cur, user_id: int) -> bool:
+    cur.execute(
+        "SELECT pinpon_fecha_fin FROM users WHERE telegram_user_id = %s", (user_id,)
+    )
+    row = cur.fetchone()
+    fin = row["pinpon_fecha_fin"] if row else None
+    if not fin:
+        return False
+    if isinstance(fin, str):
+        fin = parse_date(fin)
+    return fin >= today_date()
+
+
+def pinpon_addon_activo(user_id: int) -> bool:
+    """True si el usuario tiene el add-on de ping pong vigente."""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                return _pinpon_addon_activo_cur(cur, user_id)
+    except Exception as e:
+        logger.error("Error comprobando add-on pinpon de %s: %s", user_id, e)
+        return False
+
+
+def _pinpon_addon_extend_cur(cur, user_id, username, full_name, today, dias) -> "datetime.date":
+    """
+    Suma `dias` al add-on de ping pong (sobre su fin vigente o sobre hoy si
+    caducó/no existe), SIN tocar el plan de fútbol. Crea la fila si no existe
+    (con plan neutro 'ninguno'). Devuelve la nueva pinpon_fecha_fin.
+    """
+    cur.execute(
+        "SELECT pinpon_fecha_fin FROM users WHERE telegram_user_id = %s", (user_id,)
+    )
+    row = cur.fetchone()
+    if row is not None:
+        fin = row["pinpon_fecha_fin"]
+        if isinstance(fin, str):
+            fin = parse_date(fin)
+        base = fin if (fin and fin >= today) else today
+        nueva = base + timedelta(days=dias)
+        cur.execute(
+            "UPDATE users SET pinpon_fecha_fin = %s, pinpon_revocado = FALSE, "
+            "username = COALESCE(%s, username), full_name = COALESCE(%s, full_name), "
+            "updated_at = NOW() WHERE telegram_user_id = %s",
+            (nueva, username, full_name, user_id),
+        )
+    else:
+        nueva = today + timedelta(days=dias)
+        cur.execute(
+            "INSERT INTO users (telegram_user_id, username, full_name, plan, "
+            "fecha_inicio, fecha_fin, estado, pinpon_fecha_fin, created_at, updated_at) "
+            "VALUES (%s, %s, %s, 'ninguno', %s, %s, 'activo', %s, NOW(), NOW());",
+            (user_id, username, full_name, today, today, nueva),
+        )
+    return nueva
 
 
 async def _desbanear_de_canales(
@@ -906,10 +988,22 @@ async def generar_enlaces_acceso(
     Si se pasa user_id, antes de crear el enlace se desbanea al usuario
     (necesario: un usuario baneado ni siquiera puede solicitar entrada).
     """
+    canales = list(get_plan_channels(plan))
+    # Add-on de ping pong: si el usuario lo tiene activo (o está activando el
+    # propio plan 'pinpon'), se incluye su canal además de los del plan.
+    if canonical_plan(plan) == "pinpon" or (user_id is not None and pinpon_addon_activo(user_id)):
+        for c in pinpon_channels():
+            if c not in canales:
+                canales.append(c)
+
     if user_id is not None:
         await _desbanear_de_canales(context, user_id, plan)
+        for _, chat_id in pinpon_channels():
+            try:
+                await context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
+            except Exception:
+                pass
 
-    canales = get_plan_channels(plan)
     enlaces = []
     for titulo, chat_id in canales:
         invite = await context.bot.create_chat_invite_link(
@@ -1210,11 +1304,15 @@ def tiene_suscripcion_activa(user_id: int) -> bool:
 
 def usuario_activo_para_canal(user_id: int, chat_id: int) -> bool:
     """
-    True si el usuario tiene suscripción activa (no caducada/cancelada) cuyo
-    plan incluye `chat_id`. Base de la auto-aprobación de solicitudes de unión.
+    True si el usuario puede acceder a `chat_id`. Base de la auto-aprobación de
+    solicitudes de unión. El canal de PING PONG se rige por el add-on
+    (pinpon_fecha_fin), independiente del plan de fútbol; el resto, por el plan.
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # Canal de ping pong → add-on independiente.
+            if es_canal_pinpon(chat_id):
+                return _pinpon_addon_activo_cur(cur, user_id)
             cur.execute(
                 "SELECT plan, fecha_fin FROM users "
                 "WHERE telegram_user_id = %s AND estado = 'activo'",
@@ -1244,6 +1342,20 @@ def start_trial(user_id: int, username: str | None, full_name: str, plan: str):
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
+                if canonical_plan(plan) == "pinpon":
+                    # Prueba de PING PONG = add-on independiente (no toca fútbol).
+                    _pinpon_addon_extend_cur(cur, user_id, username, full_name, today, TRIAL_DAYS)
+                    record = {
+                        "telegram_user_id": user_id, "plan": "pinpon",
+                        "fecha_fin": new_expiry, "username": username,
+                        "full_name": full_name, "estado": "activo",
+                    }
+                    cur.execute(
+                        "INSERT INTO trials (telegram_user_id, plan, used_at) "
+                        "VALUES (%s, %s, NOW()) ON CONFLICT (telegram_user_id) DO NOTHING",
+                        (user_id, plan),
+                    )
+                    return record
                 cur.execute(
                     """
                     INSERT INTO users (
@@ -1525,6 +1637,59 @@ def aprobar_pago_tx(user_id: int, plan: str, actor_id: int, via: str):
             row = cur.fetchone()
             plan_anterior = row["plan"] if row else None
 
+            # ── PING PONG = add-on independiente ──────────────────────────
+            # No se toca el plan de fútbol: se suma al add-on y se sale. Se
+            # devuelve plan_anterior='pinpon' para que el caller NO expulse de
+            # fútbol (get_plan_channels('pinpon') == []).
+            if canonical_plan(plan) == "pinpon":
+                cur.execute(
+                    "SELECT referrer_user_id FROM referrals "
+                    "WHERE referred_user_id = %s AND estado = 'pendiente'",
+                    (user_id,),
+                )
+                ref_row = cur.fetchone()
+                pinpon_fin = _pinpon_addon_extend_cur(
+                    cur, user_id, pending["username"], pending["full_name"], today, PLAN_DAYS,
+                )
+                _registrar_acceso_cur(cur, user_id, "pinpon")
+                _registrar_evento_cur(
+                    cur, "aprobacion", target_user_id=user_id, actor_id=actor_id,
+                    actor_tipo="admin", plan="pinpon", fecha_fin=pinpon_fin,
+                    detalle=(via + " | add-on ping pong"),
+                )
+                referido_info = None
+                if ref_row is not None:
+                    referrer_id = ref_row["referrer_user_id"]
+                    cur.execute(
+                        "SELECT username, full_name FROM users WHERE telegram_user_id = %s",
+                        (referrer_id,),
+                    )
+                    rr = cur.fetchone()
+                    r_user = rr["username"] if rr else None
+                    r_name = (rr["full_name"] if rr else None) or f"Usuario {referrer_id}"
+                    r_fin = _pinpon_addon_extend_cur(cur, referrer_id, r_user, r_name, today, REFERIDOR_DIAS)
+                    _registrar_acceso_cur(cur, referrer_id, "pinpon")
+                    cur.execute(
+                        "UPDATE referrals SET estado = 'recompensado', rewarded_at = NOW() "
+                        "WHERE referred_user_id = %s",
+                        (user_id,),
+                    )
+                    _registrar_evento_cur(
+                        cur, "referido_recompensa", target_user_id=referrer_id,
+                        actor_tipo="sistema", plan="pinpon", fecha_fin=r_fin,
+                        detalle=f"por recomendar a {user_id} (+{REFERIDOR_DIAS}d ping pong)",
+                    )
+                    referido_info = {
+                        "referrer_id": referrer_id,
+                        "referrer_record": {"plan": "pinpon", "fecha_fin": r_fin},
+                    }
+                record = {
+                    "telegram_user_id": user_id, "plan": "pinpon", "fecha_fin": pinpon_fin,
+                    "username": pending["username"], "full_name": pending["full_name"],
+                    "estado": "activo",
+                }
+                return record, "pinpon", pending, referido_info
+
             # ¿Tiene un referido pendiente? (su primer pago premia al referidor)
             cur.execute(
                 "SELECT referrer_user_id FROM referrals "
@@ -1590,6 +1755,18 @@ def renovar_tx(user_id: int, plan: str, username: str | None, full_name: str, ac
             row = cur.fetchone()
             plan_anterior = row["plan"] if row else None
 
+            if canonical_plan(plan) == "pinpon":
+                pinpon_fin = _pinpon_addon_extend_cur(cur, user_id, username, full_name, today, PLAN_DAYS)
+                _registrar_acceso_cur(cur, user_id, "pinpon")
+                _registrar_evento_cur(
+                    cur, "renovacion", target_user_id=user_id, actor_id=actor_id,
+                    actor_tipo="admin", plan="pinpon", fecha_fin=pinpon_fin,
+                    detalle="via /renovar (add-on ping pong)",
+                )
+                record = {"telegram_user_id": user_id, "plan": "pinpon",
+                          "fecha_fin": pinpon_fin, "estado": "activo"}
+                return record, "pinpon"
+
             record = _extend_user_cur(cur, user_id, username, full_name, plan, today)
             _registrar_acceso_cur(cur, user_id, plan)
             _registrar_evento_cur(
@@ -1615,6 +1792,19 @@ def regalar_tx(
             )
             row = cur.fetchone()
             plan_anterior = row["plan"] if row else None
+
+            # Ping pong = add-on independiente (no toca el plan de fútbol).
+            if canonical_plan(plan) == "pinpon":
+                pinpon_fin = _pinpon_addon_extend_cur(cur, user_id, username, full_name, today, days)
+                _registrar_acceso_cur(cur, user_id, "pinpon")
+                _registrar_evento_cur(
+                    cur, "regalo", target_user_id=user_id, actor_id=actor_id,
+                    actor_tipo="admin", plan="pinpon", fecha_fin=pinpon_fin,
+                    detalle=f"{days} días (add-on ping pong)",
+                )
+                record = {"telegram_user_id": user_id, "plan": "pinpon",
+                          "fecha_fin": pinpon_fin, "estado": "activo"}
+                return record, "pinpon"
 
             record = _set_user_cur(cur, user_id, username, full_name, plan, today, days)
             _registrar_acceso_cur(cur, user_id, plan)
@@ -1650,6 +1840,30 @@ async def expulsar_de_canales(context: ContextTypes.DEFAULT_TYPE, user_id: int, 
             logger.error(f"Error expulsando {user_id} de {chat_id}: {e}")
             all_ok = False
     return all_ok
+
+
+async def _expulsar_pinpon(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    """Expulsa al usuario del canal de ping pong (add-on caducado)."""
+    ok = True
+    for _, chat_id in pinpon_channels():
+        try:
+            await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+            await context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
+            logger.info("Ping pong: usuario %s expulsado (add-on caducado)", user_id)
+        except Exception as e:
+            logger.error("Ping pong: error expulsando %s de %s: %s", user_id, chat_id, e)
+            ok = False
+    return ok
+
+
+def _marcar_pinpon_revocado(user_id: int) -> None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET pinpon_revocado = TRUE, updated_at = NOW() "
+                "WHERE telegram_user_id = %s",
+                (user_id,),
+            )
 
 
 async def _expulsar_canales_obsoletos(
@@ -3261,7 +3475,8 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     """
                     SELECT telegram_user_id, username, full_name, plan,
                            fecha_inicio, fecha_fin, estado,
-                           acceso_revocado, motivo_baja
+                           acceso_revocado, motivo_baja,
+                           pinpon_fecha_fin, pinpon_revocado
                     FROM users WHERE telegram_user_id = %s
                     """,
                     (user_id,),
@@ -3279,7 +3494,7 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     texto = (
         f"👤 {nombre} · {usuario}\n"
         f"Usuario: {record['telegram_user_id']}\n"
-        f"Plan: {record['plan']}\n"
+        f"Plan (fútbol): {record['plan']}\n"
         f"Inicio: {record['fecha_inicio']}\n"
         f"Fin: {record['fecha_fin']}\n"
         f"Estado: {record['estado']}"
@@ -3288,6 +3503,12 @@ async def estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         texto += f"\nAcceso revocado: {'sí' if record['acceso_revocado'] else 'no'}"
     if record.get("motivo_baja"):
         texto += f"\nMotivo: {record['motivo_baja']}"
+    pp = record.get("pinpon_fecha_fin")
+    if pp:
+        activo = (not record.get("pinpon_revocado")) and pp >= today_date()
+        texto += f"\n🏓 Ping Pong: {'ACTIVO' if activo else 'caducado'} (hasta {pp})"
+    else:
+        texto += "\n🏓 Ping Pong: sin add-on"
     await update.message.reply_text(texto)
 
 
@@ -3971,7 +4192,8 @@ async def _link_admin_core(context, target_user_id: int) -> str:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT plan, estado, fecha_fin FROM users WHERE telegram_user_id = %s",
+                    "SELECT plan, estado, fecha_fin, pinpon_fecha_fin, pinpon_revocado "
+                    "FROM users WHERE telegram_user_id = %s",
                     (target_user_id,),
                 )
                 return cur.fetchone()
@@ -3980,9 +4202,12 @@ async def _link_admin_core(context, target_user_id: int) -> str:
     if not row:
         return (f"Usuario {target_user_id} no tiene suscripción registrada. "
                 "Usa /renovar user_id plan para darle acceso.")
-    if row["estado"] != "activo":
-        return (f"⚠️ Usuario {target_user_id} no está activo (estado={row['estado']}). "
-                "Usa /renovar user_id [plan] primero.")
+    pp = row.get("pinpon_fecha_fin")
+    pinpon_ok = bool(pp) and not row.get("pinpon_revocado") and pp >= today_date()
+    futbol_ok = row["estado"] == "activo"
+    if not futbol_ok and not pinpon_ok:
+        return (f"⚠️ Usuario {target_user_id} no tiene acceso activo (estado={row['estado']}, "
+                "sin add-on de ping pong). Usa /renovar o /regalar primero.")
 
     plan = row["plan"]
     try:
@@ -4793,6 +5018,32 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Error enviando encuesta a %s: %s",
                 c.get("telegram_user_id"), e,
             )
+
+    # ── Caducidad del add-on de PING PONG (independiente del plan) ──────
+    def _q_pp_caducados():
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT telegram_user_id FROM users "
+                    "WHERE pinpon_fecha_fin IS NOT NULL AND pinpon_fecha_fin < %s "
+                    "AND pinpon_revocado = FALSE",
+                    (today,),
+                )
+                return [r["telegram_user_id"] for r in cur.fetchall()]
+
+    for uid in await _run_db(_q_pp_caducados):
+        if await _expulsar_pinpon(context, int(uid)):
+            await _run_db(_marcar_pinpon_revocado, int(uid))
+            try:
+                await context.bot.send_message(
+                    chat_id=int(uid),
+                    text=("🏓 Tu acceso a *Ping Pong* ha caducado.\n"
+                          "Renuévalo cuando quieras 👉 "
+                          "https://t.me/erikenobi_premiumbot?start=pinpon\n🔞 +18"),
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
 
     # Limpieza de buckets de rate limiting expirados (acota memoria).
     _limpiar_rate_buckets()
