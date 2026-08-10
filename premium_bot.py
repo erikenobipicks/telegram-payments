@@ -35,6 +35,7 @@ from config import (
     DEPLOYMENT_COMMIT,
     INVITE_EXPIRY_HOURS,
     LINK_FREE,
+    PINPON_FREE_URL,
     MAX_GENERACIONES_ACCESO,
     PAYPAL_LINK,
     PICKS_DATABASE_URL,
@@ -2565,14 +2566,16 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if plan == "free":
+        botones = [[InlineKeyboardButton("⚽⛳ Entrar al FREE de Goles y Córners", url=LINK_FREE)]]
+        if PINPON_FREE_URL:
+            botones.append([InlineKeyboardButton("🏓 Entrar al FREE de Ping Pong", url=PINPON_FREE_URL)])
+        botones.append([InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")])
         await query.edit_message_text(
-            "🆓 *Canal FREE*\n\n"
-            "Accede a una selección gratuita de picks para ver cómo funciona el servicio\\.\n\n"
-            "Si quieres recibir todas las alertas, echa un vistazo a los planes premium\\.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("👉 Entrar al canal FREE", url=LINK_FREE)],
-                [InlineKeyboardButton("⬅️ Volver al menú", callback_data="menu")],
-            ]),
+            "🆓 *Canales FREE*\n\n"
+            "⚽⛳ *Goles y Córners*: selección gratuita de picks de fútbol\\.\n"
+            "🏓 *Ping Pong*: canal free del método de tenis de mesa\\.\n\n"
+            "Para recibir todas las alertas, echa un vistazo a los planes premium\\.",
+            reply_markup=InlineKeyboardMarkup(botones),
             parse_mode="MarkdownV2",
         )
         return
