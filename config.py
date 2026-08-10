@@ -29,6 +29,10 @@ CANAL_PRE_ID     = -1003837149453   # Over 2.5 FT prepartido — análisis manua
 # NOTA: el bot de pagos debe ser ADMIN de ese canal (invitar y expulsar).
 CANAL_PINPON_ID  = int(os.getenv("CANAL_PINPON_ID", "-1004259041662") or "0")
 
+# Enlace al canal FREE de ping pong (t.me/... público o de invitación). Aparece
+# un botón "🏓 Canal FREE Ping Pong" en el menú del bot. Overridable por entorno.
+PINPON_FREE_URL = (os.getenv("PINPON_FREE_URL") or "https://t.me/+PIREb9LtUqM5ZWZk").strip()
+
 LINK_FREE = "https://t.me/+WhIkP2PstS1kMDVk"
 
 # ── Precios y métodos de pago ───────────────────────────────────────────────

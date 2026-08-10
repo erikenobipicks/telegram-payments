@@ -7,6 +7,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from config import (
     CANAL_PINPON_ID,
     PAYPAL_LINK,
+    PINPON_FREE_URL,
     STRIPE_COMBO,
     STRIPE_CORNERS,
     STRIPE_GOLES,
@@ -32,11 +33,14 @@ def menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔥 GOLES + CORNERS — 30€", callback_data="combo")],
         [InlineKeyboardButton("📊 PREPARTIDO — 20€", callback_data="pre")],
     ]
-    # El botón de Ping Pong solo aparece cuando su canal está configurado.
+    # Botón al canal FREE de ping pong (si hay enlace configurado).
+    if PINPON_FREE_URL:
+        filas.append([InlineKeyboardButton("🏓 Canal FREE Ping Pong", url=PINPON_FREE_URL)])
+    # El botón de Ping Pong (premium) solo aparece cuando su canal está configurado.
     if CANAL_PINPON_ID:
         filas.append([InlineKeyboardButton("🏓 PING PONG — 50€", callback_data="pinpon")])
     filas += [
-        [InlineKeyboardButton("🎁 Invitar amigos (gana 1 mes)", callback_data="referido")],
+        [InlineKeyboardButton("🎁 Invitar amigos", callback_data="referido")],
         [
             InlineKeyboardButton("🔒 Privacidad", callback_data="privacidad"),
             InlineKeyboardButton("💬 Contacto",   url="https://t.me/erikenobi"),
