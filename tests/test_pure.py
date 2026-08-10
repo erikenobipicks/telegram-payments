@@ -337,9 +337,12 @@ def test_parse_start_tokens_invalidos_no_rompen():
     assert r["intent"] == "trial_7d"
 
 
-def test_trial_days_por_defecto_3():
-    # El default debe ser 3 (3 días bastan para un servicio con ~90% de
-    # acierto), salvo override por entorno.
+def test_trial_days_por_producto():
+    # Prueba por producto: fútbol/O2.5 = 7 días, ping pong = 3 días.
     import os
     if "TRIAL_DAYS" not in os.environ:
-        assert p.TRIAL_DAYS == 3
+        assert p.TRIAL_DAYS == 7
+    if "PINPON_TRIAL_DAYS" not in os.environ:
+        assert p.PINPON_TRIAL_DAYS == 3
+    assert p.trial_dias("combo") == p.TRIAL_DAYS
+    assert p.trial_dias("pinpon") == p.PINPON_TRIAL_DAYS

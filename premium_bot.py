@@ -57,6 +57,7 @@ from config import (
     TIMEZONE,
     TOKEN,
     TRIAL_DAYS,
+    PINPON_TRIAL_DAYS,
     TRIAL_PLANS,
     _MESES_ES,
 )
@@ -837,6 +838,11 @@ def canonical_plan(plan: str | None) -> str | None:
     return _PLAN_ALIASES.get(plan, plan)
 
 
+def trial_dias(plan: str | None) -> int:
+    """Días de prueba según el producto: Ping Pong 3, el resto (fútbol/O2.5) 7."""
+    return PINPON_TRIAL_DAYS if canonical_plan(plan) == "pinpon" else TRIAL_DAYS
+
+
 # Claves cortas del start param compuesto → campo de tracking. Ver el contrato
 # en docs/TRIAL_FUNNEL_ARCHITECTURE.md §5.
 _START_KEYMAP = {
@@ -1381,14 +1387,15 @@ def start_trial(user_id: int, username: str | None, full_name: str, plan: str):
     Marca al usuario en la tabla trials para impedir reclamarla otra vez.
     """
     today = today_date()
-    new_expiry = today + timedelta(days=TRIAL_DAYS)
+    dias = trial_dias(plan)                # 3 ping pong, 7 el resto
+    new_expiry = today + timedelta(days=dias)
 
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
                 if canonical_plan(plan) == "pinpon":
                     # Prueba de PING PONG = add-on independiente (no toca fútbol).
-                    _pinpon_addon_extend_cur(cur, user_id, username, full_name, today, TRIAL_DAYS)
+                    _pinpon_addon_extend_cur(cur, user_id, username, full_name, today, dias)
                     record = {
                         "telegram_user_id": user_id, "plan": "pinpon",
                         "fecha_fin": new_expiry, "username": username,
@@ -2197,7 +2204,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if vino_referido else ""
     )
     banner_trial = (
-        f"🎁 *Prueba gratis {TRIAL_DAYS} días*: elige un plan y activa tu prueba "
+        f"🎁 *Prueba gratis {TRIAL_DAYS} días* ({PINPON_TRIAL_DAYS} en Ping Pong): elige un plan y activa tu prueba "
         "sin pagar nada por adelantado.\n\n" if intent_trial else ""
     )
     texto = (
@@ -2718,7 +2725,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if await _run_db(has_used_trial, user.id):
             await query.edit_message_text(
                 "🎁 *Prueba gratuita ya usada*\n\n"
-                f"Solo se permite una prueba de {TRIAL_DAYS} días por usuario y ya has reclamado la tuya\\.\n\n"
+                "Solo se permite una prueba gratuita por usuario y ya has reclamado la tuya\\.\n\n"
                 "Si quieres seguir disfrutando del servicio, elige un plan en el menú\\.",
                 reply_markup=volver_markup(),
                 parse_mode="MarkdownV2",
@@ -2771,7 +2778,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.edit_message_text(
             "✅ *Prueba gratuita activada*\n\n"
             f"Plan: *{plan_real.upper()}*\n"
-            f"Duración: *{TRIAL_DAYS} días*\n"
+            f"Duración: *{trial_dias(plan_real)} días*\n"
             f"Válida hasta: *{record['fecha_fin']}*\n\n"
             "Pulsa el botón para obtener tu acceso al canal.\n"
             "Cuando caduque podrás seguir suscrito eligiendo un plan de pago.",

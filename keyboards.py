@@ -14,6 +14,7 @@ from config import (
     STRIPE_PINPON,
     STRIPE_PRE,
     TRIAL_DAYS,
+    PINPON_TRIAL_DAYS,
     TRIAL_PLANS,
 )
 
@@ -64,9 +65,11 @@ def pago_markup(plan: str) -> InlineKeyboardMarkup:
     stripe_url = stripes.get(plan, "")
     keyboard = []
     # La prueba gratis solo se ofrece en los planes con trial (ver TRIAL_PLANS).
+    # Ping Pong: 3 días; el resto: 7.
     if plan in TRIAL_PLANS:
+        _dias = PINPON_TRIAL_DAYS if plan == "pinpon" else TRIAL_DAYS
         keyboard.append([InlineKeyboardButton(
-            f"🎁 Probar gratis {TRIAL_DAYS} días",
+            f"🎁 Probar gratis {_dias} días",
             callback_data=f"trial:{plan}",
         )])
     if stripe_url:
