@@ -353,6 +353,17 @@ def init_db():
                 "UPDATE users SET pinpon_fecha_fin = fecha_fin "
                 "WHERE plan = 'pinpon' AND pinpon_fecha_fin IS NULL;"
             )
+            # Auto-reparación (idempotente): usuarios SOLO con add-on de ping pong
+            # (plan 'ninguno' o legacy 'pinpon') que la pasada de fútbol marcó como
+            # 'caducado' POR ERROR, pese a tener el add-on de ping pong todavía
+            # vigente. Se les restaura 'activo' (su acceso al canal de ping pong ya
+            # se regía bien por pinpon_fecha_fin, esto solo corrige el estado).
+            cur.execute(
+                "UPDATE users SET estado = 'activo', acceso_revocado = FALSE, "
+                "updated_at = NOW() "
+                "WHERE plan IN ('pinpon', 'ninguno') AND estado = 'caducado' "
+                "AND pinpon_revocado = FALSE AND pinpon_fecha_fin >= CURRENT_DATE;"
+            )
             # Dedup PERSISTENTE de los avisos de expiración: evita que un
             # reinicio/redeploy del bot vuelva a mandar el mismo aviso (antes el
             # control era solo en memoria y se perdía en cada arranque).
@@ -932,6 +943,15 @@ def get_plan_channels(plan: str) -> list[tuple[str, int]]:
             ("📊 PREPARTIDO", CANAL_PRE_ID),
         ]
     return []
+
+
+# Planes SIN canal de fútbol propio. La pasada de caducidad de FÚTBOL (basada en
+# fecha_fin) debe IGNORARLOS: su acceso lo gestiona la pasada del add-on de ping
+# pong (pinpon_fecha_fin). Si no se excluyen, un usuario que solo tiene el add-on
+# (plan 'ninguno', creado por un trial de ping pong) o un legacy plan 'pinpon' se
+# marca como "caducado" en cuanto su fecha_fin (basura) vence, y se intenta
+# expulsarlo de un plan sin canales → falla y avisa al admin en falso.
+PLANES_SIN_CANAL_FUTBOL = ["pinpon", "ninguno"]
 
 
 # ── Add-on de PING PONG (independiente del plan de fútbol) ──────────────────
@@ -4860,8 +4880,9 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     FROM users
                     WHERE estado = 'activo'
                       AND fecha_fin <= %s
+                      AND plan <> ALL(%s)
                     """,
-                    (today + timedelta(days=3),),
+                    (today + timedelta(days=3), PLANES_SIN_CANAL_FUTBOL),
                 )
                 return cur.fetchall()
 
@@ -5005,9 +5026,10 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     FROM users
                     WHERE estado <> 'activo'
                       AND acceso_revocado = FALSE
+                      AND plan <> ALL(%s)
                       AND updated_at >= NOW() - (%s * INTERVAL '1 day')
                     """,
-                    (REEXPULSION_RETRY_DAYS,),
+                    (PLANES_SIN_CANAL_FUTBOL, REEXPULSION_RETRY_DAYS),
                 )
                 return cur.fetchall()
 
@@ -5041,9 +5063,10 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     LEFT JOIN encuestas e ON e.telegram_user_id = u.telegram_user_id
                     WHERE u.estado = 'caducado'
                       AND u.fecha_fin <= %s
+                      AND u.plan <> ALL(%s)
                       AND e.telegram_user_id IS NULL
                     """,
-                    (today - timedelta(days=delay_days),),
+                    (today - timedelta(days=delay_days), PLANES_SIN_CANAL_FUTBOL),
                 )
                 return cur.fetchall()
 

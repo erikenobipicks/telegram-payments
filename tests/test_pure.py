@@ -69,6 +69,15 @@ def test_get_plan_channels_alias():
     assert len(p.get_plan_channels("pre_o25")) == 1
 
 
+def test_planes_sin_canal_futbol_invariante():
+    # Los planes que la pasada de caducidad de FÚTBOL debe ignorar NO deben tener
+    # canal de fútbol (su acceso lo gestiona el add-on pinpon_fecha_fin). Si esto
+    # cambiara, la exclusión de check_expirations dejaría un plan sin gestionar.
+    assert set(p.PLANES_SIN_CANAL_FUTBOL) == {"pinpon", "ninguno"}
+    for plan in p.PLANES_SIN_CANAL_FUTBOL:
+        assert p.get_plan_channels(plan) == []
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # parse_date
 # ──────────────────────────────────────────────────────────────────────────
