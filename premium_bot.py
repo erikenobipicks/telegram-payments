@@ -1060,9 +1060,12 @@ async def generar_enlaces_acceso(
     (necesario: un usuario baneado ni siquiera puede solicitar entrada).
     """
     canales = list(get_plan_channels(plan))
-    # Add-on de ping pong: si el usuario lo tiene activo (o está activando el
-    # propio plan 'pinpon'), se incluye su canal además de los del plan.
-    if canonical_plan(plan) == "pinpon" or (user_id is not None and pinpon_addon_activo(user_id)):
+    # Add-on de ping pong: se incluye su canal SOLO si el usuario lo tiene
+    # vigente (pinpon_fecha_fin >= hoy). No basta con que el plan sea 'pinpon':
+    # un plan legacy 'pinpon' con el add-on caducado generaba un enlace que el
+    # canal luego rechazaba (pinpon_fecha_fin < hoy) → bucle de enlaces muertos.
+    # Así la generación de enlaces coincide con el gate de acceso al canal.
+    if user_id is not None and pinpon_addon_activo(user_id):
         for c in pinpon_channels():
             if c not in canales:
                 canales.append(c)
@@ -3117,11 +3120,22 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
 
     try:
         # El desbaneo ya se hizo arriba, no hace falta repetirlo en generar.
-        enlaces = await generar_enlaces_acceso(context, plan)
+        # Se pasa user.id para que el canal de ping pong solo se incluya si el
+        # add-on está vigente (coherente con el gate del canal).
+        enlaces = await generar_enlaces_acceso(context, plan, user_id=user.id)
     except Exception as e:
         logger.error(f"Error generando enlaces para {user.id}: {e}")
         await query.edit_message_text(
             "⚠️ Ha habido un error generando tu enlace. Por favor, contáctame: @erikenobi"
+        )
+        return
+
+    # Sin canales que entregar (p.ej. add-on de ping pong caducado): no mostrar un
+    # "acceso activado" vacío. Se avisa al usuario para que renueve.
+    if not enlaces:
+        await query.edit_message_text(
+            "⚠️ Tu suscripción no tiene acceso activo en este momento (puede haber "
+            "caducado). Escríbeme para renovarla: @erikenobi"
         )
         return
 
@@ -4310,10 +4324,16 @@ async def _link_admin_core(context, target_user_id: int) -> str:
                 "Usa /renovar user_id plan para darle acceso.")
     pp = row.get("pinpon_fecha_fin")
     pinpon_ok = bool(pp) and not row.get("pinpon_revocado") and pp >= today_date()
-    futbol_ok = row["estado"] == "activo"
+    # 'activo' NO implica acceso si el plan no tiene canales de fútbol (plan
+    # 'pinpon'/'ninguno' de solo add-on): su acceso lo decide pinpon_ok. Así, un
+    # usuario cuyo ping pong caducó no genera enlaces que el canal rechazaría.
+    futbol_ok = row["estado"] == "activo" and bool(get_plan_channels(row["plan"]))
     if not futbol_ok and not pinpon_ok:
-        return (f"⚠️ Usuario {target_user_id} no tiene acceso activo (estado={row['estado']}, "
-                "sin add-on de ping pong). Usa /renovar o /regalar primero.")
+        _pp_txt = f", ping pong hasta {pp}" if pp else ""
+        return (f"⚠️ Usuario {target_user_id} no tiene acceso activo "
+                f"(estado={row['estado']}, plan={row['plan']}{_pp_txt}). "
+                "El add-on de ping pong está caducado o no existe: "
+                f"usa `/regalar {target_user_id} pinpon 30` o /renovar.")
 
     plan = row["plan"]
     try:
