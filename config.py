@@ -88,6 +88,15 @@ REEXPULSION_RETRY_DAYS = 7
 # reinicia con cada aprobación/renovación/regalo (registrar_acceso_pendiente).
 MAX_GENERACIONES_ACCESO = int(os.getenv("MAX_GENERACIONES_ACCESO", "6"))
 
+# Encuesta de SATISFACCIÓN (CSAT) a clientes ACTIVOS: se envía una sola vez,
+# tras NPS_DELAY_DAYS días desde el alta, en lotes de NPS_LOTE por barrido (cada
+# hora) para no escribir a todos de golpe, y solo entre NPS_HORA_MIN y
+# NPS_HORA_MAX (hora Madrid) para no molestar de madrugada.
+NPS_DELAY_DAYS = int(os.getenv("NPS_DELAY_DAYS", "12"))
+NPS_LOTE       = int(os.getenv("NPS_LOTE", "10"))
+NPS_HORA_MIN   = int(os.getenv("NPS_HORA_MIN", "11"))
+NPS_HORA_MAX   = int(os.getenv("NPS_HORA_MAX", "21"))
+
 TIMEZONE = "Europe/Madrid"
 
 DEPLOYMENT_COMMIT = (

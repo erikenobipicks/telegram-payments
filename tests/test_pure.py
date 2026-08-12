@@ -278,6 +278,27 @@ def test_markups_borrado():
     assert "borrar:confirm" in _callbacks(p._confirmar_borrado_markup())
 
 
+def test_razones_encuesta_prueba_vs_pago():
+    # RAZONES_TODAS es la unión (para mostrar/validar cualquier razón guardada).
+    assert set(p.RAZONES_TODAS) >= set(p.RAZONES_ENCUESTA) | set(p.RAZONES_ENCUESTA_PRUEBA)
+    # La prueba tiene motivos propios de conversión que el flujo de pago no usa.
+    assert "metodo" in p.RAZONES_ENCUESTA_PRUEBA and "metodo" not in p.RAZONES_ENCUESTA
+    assert "aciertos" in p.RAZONES_ENCUESTA
+
+
+def test_encuesta_razon_markup_diferencia_prueba():
+    cb_pago = _callbacks(p._encuesta_razon_markup(es_prueba=False))
+    cb_prueba = _callbacks(p._encuesta_razon_markup(es_prueba=True))
+    assert "enc:razon:aciertos" in cb_pago and "enc:razon:aciertos" not in cb_prueba
+    assert "enc:razon:metodo" in cb_prueba and "enc:razon:metodo" not in cb_pago
+
+
+def test_nps_markups():
+    vals = _callbacks(p._nps_valoracion_markup())
+    assert vals == [f"nps:val:{i}" for i in range(1, 6)]
+    assert "nps:skip" in _callbacks(p._nps_skip_markup())
+
+
 def test_formatear_evento():
     row = {
         "created_at": dt.datetime(2026, 6, 8, 10, 30),
