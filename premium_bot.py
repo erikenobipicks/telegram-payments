@@ -1401,6 +1401,42 @@ def tiene_suscripcion_activa(user_id: int) -> bool:
     return fecha_fin >= today_date()
 
 
+def usuario_tiene_acceso_activo(user_id: int) -> bool:
+    """
+    True si el usuario tiene acceso ACTIVO a algún canal: plan de fútbol vigente
+    (estado activo + con canales) o add-on de ping pong vigente. Se usa en /start
+    para NO ofrecer un 'acceso pendiente' obsoleto a quien ya caducó — si no, se
+    queda atascado en el botón de acceso y nunca llega al menú de planes.
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT plan, estado, fecha_fin, pinpon_fecha_fin, pinpon_revocado "
+                    "FROM users WHERE telegram_user_id = %s",
+                    (user_id,),
+                )
+                row = cur.fetchone()
+    except Exception as e:
+        logger.error("Error comprobando acceso activo de %s: %s", user_id, e)
+        return False
+    if not row:
+        return False
+    ff = row.get("fecha_fin")
+    if isinstance(ff, str):
+        ff = parse_date(ff)
+    futbol_ok = (
+        row["estado"] == "activo"
+        and bool(get_plan_channels(row["plan"]))
+        and (ff is None or ff >= today_date())
+    )
+    pp = row.get("pinpon_fecha_fin")
+    if isinstance(pp, str):
+        pp = parse_date(pp)
+    pinpon_ok = bool(pp) and not row.get("pinpon_revocado") and pp >= today_date()
+    return futbol_ok or pinpon_ok
+
+
 def usuario_activo_para_canal(user_id: int, chat_id: int) -> bool:
     """
     True si el usuario puede acceder a `chat_id`. Base de la auto-aprobación de
@@ -2330,8 +2366,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     except Exception as e:
                         logger.error("Error avisando referido al admin %s: %s", admin_id, e)
 
+        # Solo se ofrece el 'acceso pendiente' si el usuario TIENE acceso activo:
+        # un pending obsoleto (de un ciclo ya caducado) bloqueaba el menú de
+        # planes y dejaba al usuario atascado sin poder volver a suscribirse.
         acceso = await _run_db(get_acceso_pendiente, user.id)
-        if acceso:
+        if acceso and await _run_db(usuario_tiene_acceso_activo, user.id):
             await update.message.reply_text(
                 "🎉 Tienes un acceso aprobado pendiente de recoger.\n"
                 "Pulsa el botón para obtener tu enlace de entrada.",
