@@ -2373,8 +2373,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if acceso and await _run_db(usuario_tiene_acceso_activo, user.id):
             await update.message.reply_text(
                 "🎉 Tienes un acceso aprobado pendiente de recoger.\n"
-                "Pulsa el botón para obtener tu enlace de entrada.",
-                reply_markup=acceso_listo_markup(),
+                "Pulsa el botón para obtener tu enlace de entrada.\n\n"
+                "¿Quieres pasar a un plan de pago? Pulsa «Ver planes de pago».",
+                reply_markup=acceso_listo_markup(con_planes=True),
             )
             return
 
