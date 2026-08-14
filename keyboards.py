@@ -100,10 +100,13 @@ def admin_approval_markup(user_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def acceso_listo_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔑 Obtener mi acceso", callback_data="obtener_acceso")]]
-    )
+def acceso_listo_markup(con_planes: bool = False) -> InlineKeyboardMarkup:
+    filas = [[InlineKeyboardButton("🔑 Obtener mi acceso", callback_data="obtener_acceso")]]
+    # En la prueba (o con acceso activo), el usuario debe poder llegar al menú de
+    # planes para pagar/suscribirse; si no, /start se quedaba solo en esta pantalla.
+    if con_planes:
+        filas.append([InlineKeyboardButton("💳 Ver planes de pago", callback_data="menu")])
+    return InlineKeyboardMarkup(filas)
 
 
 def _privacidad_markup() -> InlineKeyboardMarkup:
