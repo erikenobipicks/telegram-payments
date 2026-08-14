@@ -1069,7 +1069,7 @@ async def _desbanear_de_canales(
 
 async def generar_enlaces_acceso(
     context: ContextTypes.DEFAULT_TYPE, plan: str, user_id: int | None = None
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, int, str]]:
     """
     Genera enlaces de invitación frescos en el momento de la llamada.
 
@@ -1111,7 +1111,10 @@ async def generar_enlaces_acceso(
             creates_join_request=True,
             expire_date=now_utc() + timedelta(hours=INVITE_EXPIRY_HOURS),
         )
-        enlaces.append((titulo, invite.invite_link))
+        # (titulo, chat_id, enlace): el chat_id es necesario para persistir y
+        # revocar DESPUÉS el enlace correcto — incluido el del canal de ping pong,
+        # que get_plan_channels(plan) no devuelve y antes se perdía en el zip.
+        enlaces.append((titulo, chat_id, invite.invite_link))
         logger.info(f"Enlace (solicitud) generado para {titulo} — caduca en {INVITE_EXPIRY_HOURS}h")
     return enlaces
 
@@ -1364,7 +1367,7 @@ def es_trial_actual(user_id: int, fecha_inicio, fecha_fin) -> bool:
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT used_at FROM trials WHERE telegram_user_id = %s",
+                "SELECT used_at, plan FROM trials WHERE telegram_user_id = %s",
                 (user_id,),
             )
             row = cur.fetchone()
@@ -1379,9 +1382,12 @@ def es_trial_actual(user_id: int, fecha_inicio, fecha_fin) -> bool:
     if isinstance(fecha_fin, str):
         fecha_fin = parse_date(fecha_fin)
 
+    # La duración depende del producto (3 días ping pong, 7 el resto); usar el
+    # valor fijo TRIAL_DAYS detectaría mal un trial de ping pong como no-trial.
+    dias = trial_dias(row.get("plan"))
     return (
         fecha_inicio == used_date
-        and fecha_fin == used_date + timedelta(days=TRIAL_DAYS)
+        and fecha_fin == used_date + timedelta(days=dias)
     )
 
 
@@ -2093,6 +2099,63 @@ def _marcar_pinpon_revocado(user_id: int) -> None:
             )
 
 
+def _revocar_pinpon_db(user_id: int) -> bool:
+    """
+    Baja MANUAL del add-on de ping pong: vence pinpon_fecha_fin (ayer) y marca
+    pinpon_revocado. Vencer la fecha es lo que niega el acceso en el gate del
+    canal (usuario_activo_para_canal → _pinpon_addon_activo_cur mira la fecha).
+    Devuelve True si el usuario tenía add-on (pinpon_fecha_fin no nulo).
+    """
+    ayer = today_date() - timedelta(days=1)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT pinpon_fecha_fin FROM users WHERE telegram_user_id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            if not row or row["pinpon_fecha_fin"] is None:
+                return False
+            cur.execute(
+                "UPDATE users SET pinpon_fecha_fin = %s, pinpon_revocado = TRUE, "
+                "updated_at = NOW() WHERE telegram_user_id = %s",
+                (ayer, user_id),
+            )
+    return True
+
+
+async def _revocar_pinpon_manual(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    """
+    Revoca el add-on de ping pong en una baja/expulsión manual: expulsa del canal
+    y vence el add-on. Devuelve None si el usuario no tenía add-on; si lo tenía,
+    True/False según si el ban salió bien.
+    """
+    tenia = await _run_db(_revocar_pinpon_db, user_id)
+    if not tenia:
+        return None
+    return await _expulsar_pinpon(context, user_id)
+
+
+def tiene_futbol_activo(user_id: int) -> bool:
+    """True si el usuario tiene un plan de FÚTBOL vigente (excluye add-on pinpon)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT plan, fecha_fin FROM users "
+                "WHERE telegram_user_id = %s AND estado = 'activo'",
+                (user_id,),
+            )
+            row = cur.fetchone()
+    if not row or row["plan"] in PLANES_SIN_CANAL_FUTBOL:
+        return False
+    if not get_plan_channels(row["plan"]):
+        return False
+    fecha_fin = row["fecha_fin"]
+    if isinstance(fecha_fin, str):
+        fecha_fin = parse_date(fecha_fin)
+    return fecha_fin is None or fecha_fin >= today_date()
+
+
 async def _expulsar_canales_obsoletos(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
@@ -2603,6 +2666,9 @@ async def borrar_datos_callback(update: Update, context: ContextTypes.DEFAULT_TY
         plan = await _run_db(get_user_plan, user.id)
         if plan:
             await expulsar_de_canales(context, user.id, plan)
+        # También del canal de ping pong (add-on independiente), por si su único
+        # producto era ese: si no, quedaría dentro tras borrar sus datos.
+        await _revocar_pinpon_manual(context, user.id)
         counts = await _run_db(borrar_datos_usuario, user.id)
         await _run_db(
             registrar_evento, "datos_borrados",
@@ -2946,9 +3012,19 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        if await _run_db(tiene_suscripcion_activa, user.id):
+        # El bloqueo debe mirar el PRODUCTO de la prueba, no cualquier acceso:
+        # ping pong es un add-on independiente. Antes se usaba
+        # `tiene_suscripcion_activa` (solo fútbol), así que un abonado de fútbol
+        # no podía probar ping pong (y viceversa el día del alta del add-on).
+        if plan_real == "pinpon":
+            ya_activo = await _run_db(pinpon_addon_activo, user.id)
+            producto = "el add-on de Ping Pong"
+        else:
+            ya_activo = await _run_db(tiene_futbol_activo, user.id)
+            producto = "una suscripción de fútbol"
+        if ya_activo:
             await query.edit_message_text(
-                "Ya tienes una suscripción activa, así que no necesitas la prueba 🙌\n\n"
+                f"Ya tienes {producto} activo, así que no necesitas esta prueba 🙌\n\n"
                 "Si quieres cambiar de plan, escríbeme: @erikenobi",
                 reply_markup=volver_markup(),
             )
@@ -3007,6 +3083,11 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if plan.startswith("bizum:"):
         _, plan_real = plan.split(":", 1)
+        # Recrear el pending: si se limpió (activó un trial, aprobación previa, o
+        # limpieza a 7 días) y el usuario vuelve a esta ficha desde el historial,
+        # su comprobante se aceptará igualmente en vez de "usa /start".
+        if plan_real in ("goles", "corners", "combo", "pre", "pinpon"):
+            await _run_db(upsert_pending_payment, user.id, user.username, user.full_name, plan_real)
         importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO,
                     "pre": PRECIO_PRE, "pinpon": PRECIO_PINPON}
         importe  = importes.get(plan_real, "consultar")
@@ -3031,6 +3112,8 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if plan.startswith("revolut:"):
         _, plan_real = plan.split(":", 1)
+        if plan_real in ("goles", "corners", "combo", "pre", "pinpon"):
+            await _run_db(upsert_pending_payment, user.id, user.username, user.full_name, plan_real)
         importes = {"goles": PRECIO_GOLES, "corners": PRECIO_CORNERS, "combo": PRECIO_COMBO,
                     "pre": PRECIO_PRE, "pinpon": PRECIO_PINPON}
         importe  = importes.get(plan_real, "consultar")
@@ -3407,14 +3490,10 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
-    # Persistir los enlaces (con su chat_id) y contar esta generación. El orden
-    # de `enlaces` coincide con el de get_plan_channels(plan), así que podemos
-    # emparejar cada link con su chat_id por posición.
-    canales = get_plan_channels(plan)
-    enlaces_con_chat = [
-        [chat_id, link]
-        for (_, chat_id), (_, link) in zip(canales, enlaces)
-    ]
+    # Persistir los enlaces (con su chat_id, que ya viene en cada tupla) y contar
+    # esta generación. Incluye el canal de ping pong, que antes se perdía al
+    # emparejar con get_plan_channels(plan) y quedaba sin revocar.
+    enlaces_con_chat = [[chat_id, link] for (_titulo, chat_id, link) in enlaces]
     await _run_db(guardar_enlaces_generados, user.id, enlaces_con_chat)
     await _run_db(
         registrar_evento, "acceso_entregado",
@@ -3429,12 +3508,12 @@ async def callback_obtener_acceso(update: Update, context: ContextTypes.DEFAULT_
         "Pulsa tu enlace y luego *Solicitar acceso* — te aprobaré "
         "automáticamente al instante:\n\n"
     )
-    for titulo, link in enlaces:
+    for titulo, _chat, link in enlaces:
         texto += f"{titulo}\n{link}\n\n"
 
     texto += (
-        "⏱ El enlace caduca en 1 hora. Si caduca, pulsa el botón de abajo "
-        "para generar otro."
+        f"⏱ El enlace caduca en {INVITE_EXPIRY_HOURS}h. Si caduca, pulsa el botón "
+        "de abajo para generar otro."
     )
 
     # No borramos pending_access: así el usuario puede regenerar el enlace
@@ -3700,7 +3779,7 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
                         f"Válido hasta: {record['fecha_fin']}"
                         f"{bonus_txt}\n\n"
                         "Pulsa el botón cuando estés listo para entrar al canal.\n"
-                        "El enlace se generará en el momento y tendrá 1 hora de validez."
+                        f"El enlace se generará en el momento y durará {INVITE_EXPIRY_HOURS}h."
                     ),
                     reply_markup=acceso_listo_markup(),
                     parse_mode="Markdown",
@@ -3732,6 +3811,17 @@ async def admin_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
             _, user_id = parts
             user_id_int = int(user_id)
+
+            # Si el pago ya se resolvió (p.ej. aprobado desde otro comprobante),
+            # no hay pendiente: NO mandamos al usuario un "no he podido validar"
+            # que contradiga el "pago aprobado" que ya recibió.
+            pend = await _run_db(get_pending_payment, user_id_int)
+            if not pend:
+                await query.edit_message_text(
+                    f"⚠️ Usuario {user_id_int} ya no está en pendientes "
+                    "(¿ya aprobado o rechazado?). No se le ha enviado nada."
+                )
+                return
 
             try:
                 await context.bot.send_message(
@@ -3816,7 +3906,7 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"Válido hasta: {record['fecha_fin']}"
                 f"{bonus_txt}\n\n"
                 "Pulsa el botón cuando estés listo para entrar al canal.\n"
-                "El enlace se generará en el momento y tendrá 1 hora de validez."
+                f"El enlace se generará en el momento y durará {INVITE_EXPIRY_HOURS}h."
             ),
             reply_markup=acceso_listo_markup(),
             parse_mode="Markdown",
@@ -4616,8 +4706,8 @@ async def renovar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not aviso_al_user_ok:
         respuesta += "\n\n⚠️ No he podido mandarle DM (¿bot bloqueado?). Comparte tú el link:"
     if enlaces:
-        respuesta += "\n\nEnlaces de acceso (1 uso, 1 hora):"
-        for titulo, link in enlaces:
+        respuesta += f"\n\nEnlaces de acceso (por solicitud de unión, {INVITE_EXPIRY_HOURS}h):"
+        for titulo, _chat, link in enlaces:
             respuesta += f"\n{titulo}: {link}"
 
     await update.message.reply_text(respuesta)
@@ -4645,11 +4735,20 @@ async def _link_admin_core(context, target_user_id: int) -> str:
         return (f"Usuario {target_user_id} no tiene suscripción registrada. "
                 "Usa /renovar user_id plan para darle acceso.")
     pp = row.get("pinpon_fecha_fin")
+    if isinstance(pp, str):
+        pp = parse_date(pp)
     pinpon_ok = bool(pp) and not row.get("pinpon_revocado") and pp >= today_date()
+    ff = row.get("fecha_fin")
+    if isinstance(ff, str):
+        ff = parse_date(ff)
     # 'activo' NO implica acceso si el plan no tiene canales de fútbol (plan
-    # 'pinpon'/'ninguno' de solo add-on): su acceso lo decide pinpon_ok. Así, un
-    # usuario cuyo ping pong caducó no genera enlaces que el canal rechazaría.
-    futbol_ok = row["estado"] == "activo" and bool(get_plan_channels(row["plan"]))
+    # 'pinpon'/'ninguno' de solo add-on) o si la fecha ya pasó: su acceso lo
+    # decide pinpon_ok. Así no se generan enlaces que el canal rechazaría.
+    futbol_ok = (
+        row["estado"] == "activo"
+        and bool(get_plan_channels(row["plan"]))
+        and (ff is None or ff >= today_date())
+    )
     if not futbol_ok and not pinpon_ok:
         _pp_txt = f", ping pong hasta {pp}" if pp else ""
         return (f"⚠️ Usuario {target_user_id} no tiene acceso activo "
@@ -4657,21 +4756,25 @@ async def _link_admin_core(context, target_user_id: int) -> str:
                 "El add-on de ping pong está caducado o no existe: "
                 f"usa `/regalar {target_user_id} pinpon 30` o /renovar.")
 
-    plan = row["plan"]
+    # Si el fútbol NO está vigente pero sí el ping pong, se generan SOLO los
+    # enlaces de ping pong (plan neutro): evita un enlace de fútbol muerto.
+    plan = row["plan"] if futbol_ok else "ninguno"
     try:
         enlaces = await generar_enlaces_acceso(context, plan, user_id=target_user_id)
     except Exception as e:
         logger.error("Error generando enlaces en /link para %s: %s", target_user_id, e)
         return f"Error generando enlaces: {e}"
     if not enlaces:
-        return f"No hay canales asociados al plan '{plan}'. Comprueba la configuración."
+        return f"No hay canales activos que entregar a {target_user_id}. Comprueba su suscripción."
 
+    _hasta = row["fecha_fin"] if futbol_ok else pp
+    _etq = row["plan"].upper() if futbol_ok else "PING PONG"
     respuesta = (
         f"🔑 Enlaces para usuario {target_user_id} "
-        f"({plan.upper()}, hasta {row['fecha_fin']})\n"
-        f"Cada enlace es de *1 uso* y dura *{INVITE_EXPIRY_HOURS}h*:\n"
+        f"({_etq}, hasta {_hasta})\n"
+        f"Cada enlace se aprueba por solicitud de unión y dura *{INVITE_EXPIRY_HOURS}h*:\n"
     )
-    for titulo, link in enlaces:
+    for titulo, _chat, link in enlaces:
         respuesta += f"\n{titulo}: {link}"
     return respuesta
 
@@ -4906,8 +5009,8 @@ async def regalar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not dm_ok:
         respuesta += "\n\n⚠️ No he podido mandarle DM. Comparte tú el link:"
     if enlaces:
-        respuesta += "\n\nEnlaces de acceso (1 uso, 1 hora):"
-        for titulo, link in enlaces:
+        respuesta += f"\n\nEnlaces de acceso (por solicitud de unión, {INVITE_EXPIRY_HOURS}h):"
+        for titulo, _chat, link in enlaces:
             respuesta += f"\n{titulo}: {link}"
 
     await update.message.reply_text(respuesta)
@@ -4947,7 +5050,14 @@ async def expulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Ese usuario no está registrado.")
         return
 
-    ok = await expulsar_de_canales(context, target_user_id, record["plan"])
+    canales_futbol = get_plan_channels(record["plan"])
+    ok_futbol = (
+        await expulsar_de_canales(context, target_user_id, record["plan"])
+        if canales_futbol else True
+    )
+    pp_res = await _revocar_pinpon_manual(context, target_user_id)
+    ok_pinpon = True if pp_res is None else pp_res
+    ok = ok_futbol and ok_pinpon
     await _run_db(borrar_acceso_pendiente, target_user_id)
 
     def _q_upd():
@@ -5066,7 +5176,17 @@ async def _baja_usuario(
         await update.message.reply_text("Ese usuario no está registrado.")
         return
 
-    ok = await expulsar_de_canales(context, target_user_id, record["plan"])
+    # Expulsión de FÚTBOL (si el plan tiene canales) + revocación del add-on de
+    # PING PONG (independiente): así un cliente de solo ping pong —o mixto— queda
+    # realmente sin acceso al reembolsarlo/cancelarlo, no solo el fútbol.
+    canales_futbol = get_plan_channels(record["plan"])
+    ok_futbol = (
+        await expulsar_de_canales(context, target_user_id, record["plan"])
+        if canales_futbol else True
+    )
+    pp_res = await _revocar_pinpon_manual(context, target_user_id)
+    ok_pinpon = True if pp_res is None else pp_res
+    ok = ok_futbol and ok_pinpon
     await _run_db(borrar_acceso_pendiente, target_user_id)
 
     def _q_upd():
@@ -5150,7 +5270,17 @@ async def reexpulsar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         plan     = row["plan"]
         nombre   = row["full_name"] or f"User {user_id}"
         try:
-            ok = await expulsar_de_canales(context, int(user_id), plan)
+            # Fútbol (si el plan tiene canales) + add-on de ping pong: un plan
+            # 'ninguno'/'pinpon' no tiene canales de fútbol, así que sin esto
+            # salía siempre ❌ y nunca se marcaba acceso_revocado (ruido eterno).
+            canales_futbol = get_plan_channels(plan)
+            ok_futbol = (
+                await expulsar_de_canales(context, int(user_id), plan)
+                if canales_futbol else True
+            )
+            pp_res = await _revocar_pinpon_manual(context, int(user_id))
+            ok_pinpon = True if pp_res is None else pp_res
+            ok = ok_futbol and ok_pinpon
         except Exception as e:
             logger.error("Error en /reexpulsar para %s: %s", user_id, e)
             ok = False
@@ -5436,6 +5566,10 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
         def _q_nps():
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    # Un cliente de SOLO ping pong queda estado='activo' de forma
+                    # permanente (el barrido de ping pong solo marca revocado);
+                    # se excluye si su add-on ya caducó para no encuestar a quien
+                    # ya no tiene acceso.
                     cur.execute(
                         """
                         SELECT u.telegram_user_id, u.plan, u.full_name
@@ -5444,10 +5578,15 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                         WHERE u.estado = 'activo'
                           AND u.fecha_inicio <= %s
                           AND n.telegram_user_id IS NULL
+                          AND NOT (
+                                u.plan = ANY(%s)
+                                AND (u.pinpon_fecha_fin IS NULL OR u.pinpon_fecha_fin < %s)
+                          )
                         ORDER BY u.fecha_inicio ASC
                         LIMIT %s
                         """,
-                        (today - timedelta(days=NPS_DELAY_DAYS), NPS_LOTE),
+                        (today - timedelta(days=NPS_DELAY_DAYS),
+                         PLANES_SIN_CANAL_FUTBOL, today, NPS_LOTE),
                     )
                     return cur.fetchall()
 
