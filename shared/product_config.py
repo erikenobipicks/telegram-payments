@@ -252,6 +252,10 @@ def _contexto(vertical: str | None, plan_id: str | None,
         "plan_interval_days": lambda: c["access"]["plan_interval_days"],
         "invite_expiry_hours": lambda: c["access"]["invite_expiry_hours"],
         "referrer_bonus_days": lambda: c["access"]["referral"]["referrer_bonus_days"],
+        # Hay textos que hablan de los dos productos a la vez (la landing los
+        # vende juntos) y no pueden resolverse con un solo producto en contexto.
+        "trial_days_futbol": lambda: c["products"]["futbol"]["trial"]["duration_days"],
+        "trial_days_pinpon": lambda: c["products"]["pinpon"]["trial"]["duration_days"],
     }
 
     if vertical:

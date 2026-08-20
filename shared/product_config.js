@@ -203,6 +203,9 @@
       plan_interval_days: function () { return c.access.plan_interval_days; },
       invite_expiry_hours: function () { return c.access.invite_expiry_hours; },
       referrer_bonus_days: function () { return c.access.referral.referrer_bonus_days; },
+      // Textos que hablan de los dos productos a la vez.
+      trial_days_futbol: function () { return c.products.futbol.trial.duration_days; },
+      trial_days_pinpon: function () { return c.products.pinpon.trial.duration_days; },
     };
 
     if (opts.product) {
