@@ -4,6 +4,7 @@
   "_placeholders": {
     "_comment": "Marcadores admitidos, por ámbito. El resolutor sustituye cada {marcador} con el valor correspondiente de product.json y LANZA ERROR si al terminar queda algún marcador sin resolver. Nunca escribas un número dentro de un texto: si necesitas uno, añade el marcador aquí y el campo en product.json.",
     "global": [
+      "brand_name",
       "brand_premium_name",
       "website_url",
       "support_contact",
@@ -12,7 +13,9 @@
       "responsible_gambling_domain",
       "plan_interval_days",
       "invite_expiry_hours",
-      "referrer_bonus_days"
+      "referrer_bonus_days",
+      "trial_days_futbol",
+      "trial_days_pinpon"
     ],
     "product": [
       "free_picks_per_day",
@@ -65,8 +68,8 @@
     "banner": "🎁 Prueba gratis {trial_days} días: elige un plan y activa tu prueba sin pagar nada por adelantado.",
     "reminder": "🎁 Pruébalo {trial_days} días GRATIS — sin tarjeta, sin compromiso.",
     "conditions": "Sin tarjeta por adelantado · una prueba por persona · te vas cuando quieras.",
-    "faq_question": "¿Cómo funciona la prueba de {trial_days} días?",
-    "faq_answer": "Eliges un plan en el bot y activas la prueba sin pagar nada por adelantado. Tienes acceso completo durante {trial_days} días. Una prueba por persona."
+    "faq_question": "¿Cómo funciona la prueba de {trial_days_futbol} días?",
+    "faq_answer": "Eliges un plan en el bot y activas la prueba sin pagar nada por adelantado. Tienes acceso completo durante {trial_days_futbol} días ({trial_days_pinpon} días en Ping Pong). Si encaja contigo, sigues; si no, no haces nada. Una prueba por persona."
   },
   "access": {
     "invite_expiry": "⏱ El enlace caduca en {invite_expiry_hours}h. Si caduca, pulsa el botón para generar otro.",
@@ -143,7 +146,7 @@
           "description": "Goles y córners juntos, a mejor precio. El pack completo."
         },
         "pre": {
-          "description": "Over 2.5 a mano, partido a partido, con aviso antes del inicio. Canal independiente."
+          "description": "Over 2.5 a mano, partido a partido, con aviso {reminder_minutes_before} min antes."
         }
       },
       "que_plan": {
@@ -193,7 +196,7 @@
       "receive": "Te llegan por Telegram con su análisis y el contexto del partido. Cuando hay valor de verdad, no por rellenar.",
       "bet": "Cada pick con sus unidades y una gestión sensata del bankroll. Tú mandas; yo pongo el criterio."
     },
-    "plans_intro": "Con {trial_days} días de prueba gratis para que lo veas por dentro. Pagas como te venga mejor — Stripe, PayPal, Bizum o Revolut — y lo activas en el bot.",
+    "plans_intro": "Con {trial_days_futbol} días de prueba gratis ({trial_days_pinpon} en Ping Pong) para que lo veas por dentro. Pagas como te venga mejor — Stripe, PayPal, Bizum o Revolut — y lo activas en el bot.",
     "stats_intro": "Aciertos y fallos de cada método, mes a mes, y los últimos picks lanzados. Salen directos del bot, en tiempo real. Lo que ves es lo que hay.",
     "stats_note": "Histórico de picks registrados en el bot. {legal.past_performance}",
     "offer_fine": "Método y datos de verdad. No prometo ganancias — nadie serio lo hace.",
@@ -204,16 +207,41 @@
       },
       "access": {
         "q": "¿Cómo entro al canal después de pagar?",
-        "a": "Tras el pago, envías la captura del comprobante en el chat del bot. En cuanto validamos el pago recibes un botón con tu acceso al canal."
+        "a": "Tras el pago, envías la captura del comprobante en el chat del bot. En cuanto valido el pago (normalmente el mismo día) recibes un botón con tu acceso al canal."
       },
       "cancel": {
         "q": "¿Puedo cancelar cuando quiera?",
-        "a": "Sí. No hay permanencia: si no renuevas, el acceso caduca y ya está."
+        "a": "Sí. No hay permanencia: si no renuevas, el acceso caduca y ya está. Sin ataduras."
       },
       "guarantee": {
         "q": "¿Esto garantiza ganancias?",
-        "a": "No. Es un servicio de análisis e información. Las apuestas implican riesgo de pérdida. Compartimos método, criterio y datos reales, no promesas de beneficio."
+        "a": "No. Es un servicio de análisis e información. Las apuestas implican riesgo de pérdida. Comparto método, criterio y datos reales, no promesas de beneficio."
+      },
+      "pinpon": {
+        "q": "¿Qué es el método ping pong?",
+        "a": "Picks de tenis de mesa en directo con una progresión de apuesta concreta por partido. Canal premium independiente, con su propio seguimiento de resultados y unidades."
       }
+    },
+    "meta": {
+      "title": "{brand_name} | Picks por Telegram con método y datos · Prueba {trial_days_futbol} días gratis",
+      "og_title": "{brand_name} | Picks por Telegram con método y datos",
+      "description": "Picks de goles, córners, Over 2.5 y ping pong por Telegram. Análisis, método y datos reales que se actualizan solos. Prueba el premium {trial_days_futbol} días gratis. +{min_age}, juego responsable.",
+      "og_description": "Goles, córners, Over 2.5 y ping pong por Telegram. Datos reales y prueba de {trial_days_futbol} días gratis. +{min_age}, juego responsable.",
+      "twitter_description": "Goles, córners, Over 2.5 y ping pong. Datos reales y prueba de {trial_days_futbol} días gratis. +{min_age}.",
+      "schema_description": "Picks de apuestas deportivas por Telegram con análisis, método y datos reales. Goles, córners, Over 2.5 y ping pong. Prueba premium de {trial_days_futbol} días gratis. +{min_age}, juego responsable.",
+      "image_alt": "{brand_name} — picks por Telegram con método y datos",
+      "eyebrow": "Picks por Telegram · +{min_age}"
+    },
+    "trial_both": "💡 ¿Aún dudas? Pruébalo gratis ({trial_days_futbol} días fútbol/Over 2.5, {trial_days_pinpon} días Ping Pong) y decide con tus propios ojos.",
+    "plan_cta": "Probar {trial_days} días gratis",
+    "offer_eyebrow": "Oferta de bienvenida",
+    "offer_title": "Pruébalo gratis {trial_days_futbol} días",
+    "offer_text": "{trial_days_futbol} días con todo desbloqueado, sin poner un euro. Si te convence, te quedas; si no, no pierdes nada.",
+    "cards": {
+      "free_futbol": "Una muestra gratis para verme trabajar antes de dar el paso.",
+      "free_futbol_cta": "Entrar al canal free",
+      "free_pinpon": "Canal gratis del método de tenis de mesa: parrilla, avisos y resultados.",
+      "free_pinpon_cta": "Entrar al free de Ping Pong"
     }
   },
   "marketing": {
