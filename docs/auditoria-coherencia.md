@@ -1,5 +1,9 @@
 # Auditoría de coherencia — valores de producto
 
+> **Estado:** fase 0 cerrada y resuelta. El bloque
+> [Resoluciones](#resoluciones-de-la-fase-0) recoge la decisión tomada para cada
+> contradicción; el inventario de abajo se conserva tal cual como registro.
+>
 > **Fase 0** del trabajo "fuente única de verdad para precios, límites y textos
 > de producto". **No se ha modificado ningún valor de producto** al elaborar
 > este informe: es exclusivamente un inventario.
@@ -22,9 +26,9 @@
 
 El brief asume un solo repositorio (`shared/` "en la raíz"). En realidad son
 **tres repos independientes**, desplegados por separado en Railway, sin
-submódulos ni paquete compartido. Esto no cambia la fase 0, pero sí condiciona
-la fase 1 y queda anotado en
-[Decisiones que necesito de ti](#decisiones-que-necesito-de-ti).
+submódulos ni paquete compartido. Resuelto en D1: el repo canónico es
+**`telegram-payments`** y los otros dos llevan una copia sincronizada por CI, con
+un test de guardia que falla si alguna diverge.
 
 ---
 
@@ -468,6 +472,56 @@ fuente más probable de un error futuro.
 
 ---
 
+## Resoluciones de la fase 0
+
+**Principio rector:** el refactor no cambia ningún comportamiento en producción.
+Donde el código y el copy discrepen, **gana el código**: el copy se corrige para
+describir lo que el sistema hace hoy. Los cambios de producto van en un PR
+posterior y separado. Las dos únicas excepciones que sí cambian producción son
+**C10** (aviso legal único) y **C4** (IDs cruzados en el `.env.example`).
+
+| # | Resolución | Estado |
+|---|---|---|
+| C1 | No hay valor único: bloques `free_tier` **por producto**. Fútbol **4/día** (código). Ping pong **modo `completo`** (default real), `picks_per_day: null` = sin tope. El pie de `promo.py:60` deja de ser cadena fija. `PINPON_FREE_MODO` sale del entorno y pasa a `product.json`. | Decidida |
+| C2 | Trial **7 días** (fútbol) y **3 días** (ping pong), por código. | Resuelta por defecto, pendiente de confirmar |
+| C3 | **24 h**, por código. `.env.example` corregido. | Decidida |
+| C4 | `.env.example` corregido para coincidir con los dos `config.py`, más test de guardia que compara ejemplo y configuración real. | Decidida (cambia producción) |
+| C5 | Nombres canónicos de canal fijados en `product.json` (`premium_pre_over25`, `premium_pre_carlos_mollar`, `premium_pre_general`). | Resuelta por defecto, pendiente de confirmar |
+| C6 | **30 días** (`PLAN_DAYS`), por código. El copy muestra `{plan_interval_days} días`, no "/mes". | Resuelta por defecto, pendiente de confirmar |
+| C7 | **4 métodos** (Stripe, PayPal, Bizum, Revolut), por código. | Resuelta por defecto, pendiente de confirmar |
+| C8 | Dominio canónico **con `www`**. El esquema rechaza cualquier otro. Prioridad alta: el redirect estaba descartando los UTM. | Decidida |
+| C9 | `[13, 18]`, el default de `config.py`, por código. | Resuelta por defecto, pendiente de confirmar |
+| C10 | Redacción **única** en `copy.es.json` (`legal.full` y `legal.short`), aplicada en todas partes. | Decidida (cambia producción) |
+| C11 | Los porcentajes se leen en vivo; ningún claim de rendimiento entra en `copy.es.json`. | Resuelta por defecto, pendiente de confirmar |
+| C12 | Marca **"Erikenobi Picks"**; el servicio de pago es **"Erikenobi Picks Premium"** (`brand.premium_name`). | Resuelta por defecto, pendiente de confirmar |
+
+### Decisiones estructurales
+
+| # | Resolución |
+|---|---|
+| D1 | Repo canónico **`telegram-payments`**, copia sincronizada por CI y test de guardia que falla si una copia diverge. |
+| D2 | Solo se comprueba que el Payment Link responde. El procedimiento manual de cambio de precio (**Stripe primero, `product.json` después, el mismo día**) queda documentado en `shared/README.md`. |
+| D3 | `landing-ventas` **no se borra**: 301 de todas sus rutas al canónico y archivar el repo. **Bloqueada** — ver abajo. |
+
+### D3 — verificación previa al redirect: BLOQUEADA
+
+Antes del 301 había que verificar tres cosas. Ninguna sale positiva, pero **dos no
+se pueden verificar desde el código**, así que el redirect **no se ha hecho**:
+
+| # | Comprobación | Resultado |
+|---|---|---|
+| 1 | Ningún Payment Link de Stripe apunta ahí | ⚠️ **No verificable.** No hay integración con la API de Stripe en ningún repo: son *Payment Links* configurados en el panel. La URL de redirección posterior al pago solo se ve desde el panel de Stripe. |
+| 2 | Ningún mensaje fijado, bio o mensaje automático la enlaza | ✅ **Negativo dentro de los repos.** Los 23 usos del bot username apuntan todos a `t.me/erikenobi_premiumbot?start=...`; los únicos hosts web referenciados en los tres repos son `erikenobipicks.com` y `www.erikenobipicks.com`. ⚠️ Mensajes fijados a mano, la descripción del bot en BotFather y las bios de Instagram/Threads **viven fuera del repo** y no se pueden comprobar desde aquí. |
+| 3 | No recibe visitas residuales de búsqueda | ⚠️ **No verificable.** No hay analítica cargada: `script.js` solo dispara eventos si existen `window.gtag` o `window.plausible`, y `ANALYTICS_ID` no se inyecta en ningún sitio. Haría falta Search Console o los logs del servidor. |
+
+**Hallazgo adicional:** `landing-ventas/` **no tiene ninguna configuración de
+despliegue** en el repo — sin `Procfile`, sin config de sitio estático, sin
+workflow, sin `CNAME`. Su propio `README.md` describe "crear un repo o despliegue
+específico" como un paso **futuro**. Es decir: desde el repositorio no consta ni
+que esté publicada ni en qué URL, así que tampoco hay rutas concretas que redirigir.
+
+---
+
 ## Contradicciones detectadas
 
 Cada bloque es una decisión que necesito de ti antes de continuar con la fase 1.
@@ -664,6 +718,9 @@ plantillas de Instagram, handle en minúsculas), pero "Erikenobi Picks" vs
 
 ## Decisiones que necesito de ti
 
+> **Resueltas.** Ver [Resoluciones de la fase 0](#resoluciones-de-la-fase-0).
+> Se conserva el planteamiento original como registro de por qué se decidió así.
+
 Además de C1-C12, hay tres decisiones estructurales que condicionan la fase 1:
 
 ### D1 — ¿Dónde vive `shared/`, siendo tres repos?
@@ -728,7 +785,13 @@ lo está, entra en la migración como un consumidor más.
 | Identidad | 70+ | 5 (marca) · 23 (bot username) |
 | Ligas / frecuencia / horario | 25 | — |
 
-**12 contradicciones** y **3 decisiones estructurales** pendientes.
+**12 contradicciones** y **3 decisiones estructurales**, todas resueltas en
+[Resoluciones de la fase 0](#resoluciones-de-la-fase-0). Siete quedan marcadas como
+*resuelta por defecto, pendiente de confirmar*: se han aplicado con el principio
+rector (gana el código) y no cambian comportamiento.
 
-Paro aquí, como acordamos. En cuanto me des los valores correctos de C1-C12 y
-la respuesta a D1-D3, sigo con la fase 1 (esquema).
+La fase 1 está hecha: `shared/product.json`, `shared/copy.es.json`,
+`shared/product.schema.json` y `shared/README.md`.
+
+**Bloqueado:** el 301 de `landing-ventas` (D3), a la espera de la comprobación
+manual en el panel de Stripe y en Search Console.
