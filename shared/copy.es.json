@@ -1,0 +1,226 @@
+{
+  "version": 1,
+  "locale": "es",
+  "_placeholders": {
+    "_comment": "Marcadores admitidos, por ámbito. El resolutor sustituye cada {marcador} con el valor correspondiente de product.json y LANZA ERROR si al terminar queda algún marcador sin resolver. Nunca escribas un número dentro de un texto: si necesitas uno, añade el marcador aquí y el campo en product.json.",
+    "global": [
+      "brand_premium_name",
+      "website_url",
+      "support_contact",
+      "instagram_handle",
+      "min_age",
+      "responsible_gambling_domain",
+      "plan_interval_days",
+      "invite_expiry_hours",
+      "referrer_bonus_days"
+    ],
+    "product": [
+      "free_picks_per_day",
+      "trial_days",
+      "reveal_minutes_before",
+      "alert_minutes_before",
+      "free_hours_range",
+      "leagues_list",
+      "bookmakers",
+      "stake_game_2",
+      "stake_game_3"
+    ],
+    "plan": [
+      "plan_price",
+      "plan_interval_days"
+    ],
+    "market": [
+      "advance_hours_max",
+      "reminder_minutes_before"
+    ],
+    "runtime": [
+      "racha"
+    ],
+    "_scopes": "global: siempre. product: solo con producto en contexto — resolve(clave, producto=...). plan: con plan en contexto. market: con mercado en contexto. runtime: valor calculado que aporta quien llama (no vive en product.json); el resolutor lo exige explícitamente.",
+    "_copy_refs": "Un marcador con punto, p. ej. {legal.past_performance}, es una referencia a otra clave de este mismo fichero: se resuelve primero y luego se resuelven sus marcadores. Las referencias circulares son un error.",
+    "_derived": "Algunos marcadores son valores DERIVADOS, nunca almacenados: responsible_gambling_domain (dominio de compliance.responsible_gambling_url sin esquema ni www), plan_price (de amount_cents + currency), free_hours_range (de free_tier.publication_hours), leagues_list (de products.pinpon.leagues).",
+    "_lista_viva": "Esta lista solo declara los marcadores realmente usados hoy. Al migrar un texto nuevo, añade aquí su marcador y el campo en product.json."
+  },
+  "legal": {
+    "full": "⚠️ Solo para mayores de {min_age} años. Las apuestas implican riesgo de pérdida económica. No garantizamos rentabilidad ni resultados. Juega con responsabilidad. Si crees que puede ser un problema, tienes ayuda en {responsible_gambling_domain}",
+    "short": "+{min_age} · No garantizamos rentabilidad · {responsible_gambling_domain}",
+    "age_notice": "Contenido solo para mayores de {min_age} años.",
+    "no_profit_guarantee": "No garantizamos rentabilidad ni resultados.",
+    "past_performance": "El rendimiento pasado no garantiza resultados futuros.",
+    "informational_service": "Servicio únicamente informativo. Cada usuario es responsable de sus propias decisiones.",
+    "stats_note": "Porcentajes calculados sobre picks con resultado ya conocido. {legal.past_performance} {legal.informational_service}",
+    "help_link_label": "{responsible_gambling_domain}"
+  },
+  "brand": {
+    "tagline": "Apuestas con método y datos, no a ciegas",
+    "lead": "Soy Erik. Cada día comparto mis picks por Telegram, con el análisis que hay detrás de cada uno. Aquí no se vende humo: verás el método y los resultados reales — los buenos y los malos.",
+    "support_prompt": "¿Te queda alguna duda? Escríbeme, contesto yo →",
+    "support_inline": "¿Algún problema? Escríbeme: {support_contact}"
+  },
+  "trial": {
+    "offer_title": "Prueba el premium {trial_days} días gratis",
+    "offer_body": "Acceso completo al servicio premium, sin tarjeta y sin compromiso. Una prueba por persona.",
+    "cta_button": "🎁 Probar gratis {trial_days} días",
+    "cta_link_label": "Activar mi prueba de {trial_days} días",
+    "banner": "🎁 Prueba gratis {trial_days} días: elige un plan y activa tu prueba sin pagar nada por adelantado.",
+    "reminder": "🎁 Pruébalo {trial_days} días GRATIS — sin tarjeta, sin compromiso.",
+    "conditions": "Sin tarjeta por adelantado · una prueba por persona · te vas cuando quieras.",
+    "faq_question": "¿Cómo funciona la prueba de {trial_days} días?",
+    "faq_answer": "Eliges un plan en el bot y activas la prueba sin pagar nada por adelantado. Tienes acceso completo durante {trial_days} días. Una prueba por persona."
+  },
+  "access": {
+    "invite_expiry": "⏱ El enlace caduca en {invite_expiry_hours}h. Si caduca, pulsa el botón para generar otro.",
+    "plan_period": "Cada plan da acceso al canal o servicio correspondiente durante {plan_interval_days} días.",
+    "price_line": "💰 Precio: {plan_price} / {plan_interval_days} días",
+    "referral_offer": "Comparte tu enlace personal. Cuando un amigo nuevo se suscriba, tú ganas {referrer_bonus_days} días gratis.",
+    "payment_methods_line": "Stripe · PayPal · Bizum · Revolut",
+    "payment_activation": "Tras pagar, envía la captura del comprobante en este chat. El acceso se activa en cuanto valide el pago."
+  },
+  "bot": {
+    "welcome": {
+      "header": "🔥 {brand_premium_name}",
+      "body": "Picks con análisis y datos reales por Telegram. Elige un plan o consulta la información:",
+      "referred_bonus": "🤝 ¡Vienes recomendado! Bienvenido de parte de quien te ha invitado."
+    },
+    "help": "Usa /start para ver los planes. Si ya has pagado, envía el comprobante en este chat privado.",
+    "manual_bundle": "Este paquete completo se asigna manualmente. Habla con {support_contact} si quieres renovarlo."
+  },
+  "products": {
+    "futbol": {
+      "display_name": "Fútbol",
+      "summary": "Alertas de goles y córners en directo, más el prepartido Over 2.5 FT.",
+      "free": {
+        "limit_notice": "🔒 En el canal free ves hasta {free_picks_per_day} picks al día.",
+        "schedule_notice": "Los picks free se publican de {free_hours_range} (hora española).",
+        "cta_pick_variants": [
+          "💎 Esto es uno de los {free_picks_per_day} picks gratuitos del día. En PREMIUM salen todos.",
+          "⚡ En FREE llegas tarde y con cuentagotas. En PREMIUM cada alerta te llega al instante y sin límite.",
+          "🔓 Esto es solo la muestra. Los suscriptores reciben TODOS los picks de goles y córners del día.",
+          "📈 Imagina seguir todas las alertas, no solo esta. Eso es PREMIUM.",
+          "💸 Cada pick que no ves en FREE es valor que se queda fuera. En PREMIUM no te pierdes ninguno."
+        ],
+        "cta_pick_link": "Desbloquear todos los picks",
+        "cta_resumen": "💎 Y esto es solo lo que se publica en el canal gratuito. Los suscriptores PREMIUM han recibido muchos más picks, en directo y sin límite diario.",
+        "cta_resumen_close": "🎁 Compruébalo tú mismo: {trial_days} días GRATIS, sin pagar nada 👇",
+        "captacion_variants": [
+          "🎁 Tienes {trial_days} días de PREMIUM GRATIS y aún no los has usado\n\nLo que ves en este canal es una mínima parte. Con PREMIUM recibes:\n⚽ Todos los picks de goles en directo\n🚩 Todos los picks de córners\n📊 Prepartido Over 2.5 FT\n⚡ Al instante, sin límite diario y antes que nadie\n\nNo cuesta nada probarlo 👇",
+          "💎 El canal FREE es solo la punta del iceberg\n\nAquí ves hasta {free_picks_per_day} picks al día. Debajo hay un sistema completo: cada alerta de goles y córners en tiempo real, más el prepartido Over 2.5, llegando sin tope diario.\n\n🎁 Ábrelo con {trial_days} días GRATIS. Si no te convence, lo dejas 👇",
+          "⚡ ¿Te están cuadrando los picks del canal?\n\nPues son la selección más pequeña de lo que sale cada día en PREMIUM. Los suscriptores reciben todas las alertas, antes y sin cuentagotas.\n\n🎁 Tienes {trial_days} días de prueba GRATIS esperándote. Sin tarjeta, sin compromiso 👇"
+        ],
+        "racha_notice": "🔥 ¡RACHA DE {racha} ACIERTOS SEGUIDOS!\n\nY eso contando solo los picks que se ven en FREE. Los suscriptores PREMIUM están aprovechando la racha entera, sin límite."
+      },
+      "premium": {
+        "no_daily_limit": "Al instante, sin límite diario y antes que nadie."
+      },
+      "markets": {
+        "goles": {
+          "display_name": "Goles",
+          "description": "Alertas de gol en directo: te aviso durante el partido cuando el análisis y el momentum se alinean."
+        },
+        "corners": {
+          "display_name": "Córners",
+          "description": "Alertas de córners al momento, leyendo la presión ofensiva, los tiros y las estadísticas mientras rueda el balón."
+        },
+        "over_2_5_ft": {
+          "display_name": "Over 2.5 FT",
+          "description": "Over 2.5 goles FT trabajado a mano, partido por partido, antes de que empiece.",
+          "advance_notice": "Recibes el pick con valor hasta {advance_hours_max}h antes: apuestas y a otra cosa.",
+          "reminder_notice": "Con un aviso {reminder_minutes_before} minutos antes para que no se te pase."
+        },
+        "over_1_5_ht": {
+          "display_name": "Over 1.5 HT",
+          "description": "Dos goles al descanso, resuelto por el marcador de la primera mitad."
+        }
+      },
+      "plans": {
+        "goles": {
+          "description": "El gol, en caliente. Alertas en directo y alguna selección prepartido."
+        },
+        "corners": {
+          "description": "Córners en vivo, leyendo quién empuja y quién se echa atrás."
+        },
+        "combo": {
+          "description": "Goles y córners juntos, a mejor precio. El pack completo."
+        },
+        "pre": {
+          "description": "Over 2.5 a mano, partido a partido, con aviso antes del inicio. Canal independiente."
+        }
+      },
+      "que_plan": {
+        "live": "⚽🚩 Goles y Córners — para el que vive el directo\nAlertas en tiempo real cuando el partido pide gol o córner.\n✅ La rentabilidad más constante del día a día.\n⚠️ Toca estar pendiente del móvil durante los partidos.",
+        "prepartido": "📊 Prepartido Over 2.5 — para el que va sobrado de tiempo\nRecibes el pick con valor hasta {advance_hours_max}h antes. Apuestas y a otra cosa.\n✅ Cero directo: lo dejas puesto y te olvidas.\n⚠️ Rentabilidad más contenida que el live."
+      }
+    },
+    "pinpon": {
+      "display_name": "Ping Pong",
+      "summary": "Tenis de mesa en directo con el método ping pong: una progresión clara por partido, con su seguimiento de resultados y unidades.",
+      "free": {
+        "limit_notice_completo": "🆓 En el canal free se publica todo el método: parrilla, avisos y resultados.",
+        "limit_notice_reducido": "🔒 En el free ves solo {free_picks_per_day} picks al día.",
+        "free_pick_hidden": "🎁 PICK GRATIS · se desvela {reveal_minutes_before} min antes",
+        "premium_pick_hidden": "🔒 se desvela {reveal_minutes_before} min antes",
+        "free_pick_afternoon": "🎁 PICK GRATIS DE LA TARDE",
+        "comparativa_header": "🏓 PING PONG — FREE vs PREMIUM",
+        "comparativa_free_label": "🆓 Free ({free_picks_per_day} picks):",
+        "comparativa_premium_label": "💎 Premium (todos):",
+        "cta_premium": "Todos los picks en directo, con avisos y seguimiento, en el PREMIUM 👇",
+        "last_free_day_notice": "🏓 AVISO IMPORTANTE — cambios en el canal free\n\nHoy es el último día con TODOS los picks de ping pong gratis. 🎁\n\nA partir de mañana:\n✅ Seguirás teniendo {free_picks_per_day} picks gratis cada día (uno por la mañana y otro por la tarde).\n🔒 El resto de picks pasan al canal PREMIUM.\n\nSi quieres todos los picks en directo, con avisos y seguimiento completo, te esperamos en el premium 👇",
+        "trial_promo": "🎁 {trial_days} días de Ping Pong Premium GRATIS\nPicks en directo, avisos por franja y seguimiento — sin pagar nada por adelantado.\n\n👉 Actívala aquí (una prueba por persona)"
+      },
+      "method": {
+        "title": "🏓 ¿Cómo funciona el método Ping Pong?",
+        "description": "Al acabar el primer juego se apuesta a que el perdedor gana el segundo ({stake_game_2}). Si falla, se va al tercer juego ({stake_game_3}). Al mejor de cinco.",
+        "alert_notice": "Aviso {alert_minutes_before} min antes de cada partido.",
+        "schedule_label": "🇪🇸 Horarios en hora española (peninsular)",
+        "leagues_line": "Ligas cubiertas: {leagues_list}",
+        "bookmakers_line": "Disponible en: {bookmakers}"
+      },
+      "plans": {
+        "pinpon": {
+          "description": "Tenis de mesa en directo con el método ping pong. Su propio canal."
+        }
+      },
+      "que_plan": {
+        "resumen": "🏓 Ping Pong — con horario claro\nSabes la hora exacta de cada pick.\n✅ Franjas concretas: planificas cuándo estar atento.\n⚠️ Es en directo (progresión J2/J3), pero conoces las horas de antemano."
+      }
+    }
+  },
+  "landing": {
+    "hero_cta_trial": "Pruébalo gratis {trial_days} días",
+    "hero_cta_free": "Empieza por el canal free",
+    "steps": {
+      "try": "Métete en el canal free para verme trabajar, o activa la prueba de {trial_days} días y desbloquea todo sin poner un euro.",
+      "receive": "Te llegan por Telegram con su análisis y el contexto del partido. Cuando hay valor de verdad, no por rellenar.",
+      "bet": "Cada pick con sus unidades y una gestión sensata del bankroll. Tú mandas; yo pongo el criterio."
+    },
+    "plans_intro": "Con {trial_days} días de prueba gratis para que lo veas por dentro. Pagas como te venga mejor — Stripe, PayPal, Bizum o Revolut — y lo activas en el bot.",
+    "stats_intro": "Aciertos y fallos de cada método, mes a mes, y los últimos picks lanzados. Salen directos del bot, en tiempo real. Lo que ves es lo que hay.",
+    "stats_note": "Histórico de picks registrados en el bot. {legal.past_performance}",
+    "offer_fine": "Método y datos de verdad. No prometo ganancias — nadie serio lo hace.",
+    "faq": {
+      "payment_methods": {
+        "q": "¿Qué métodos de pago hay?",
+        "a": "Stripe (tarjeta), PayPal, Bizum y Revolut. Eliges el que prefieras dentro del bot."
+      },
+      "access": {
+        "q": "¿Cómo entro al canal después de pagar?",
+        "a": "Tras el pago, envías la captura del comprobante en el chat del bot. En cuanto validamos el pago recibes un botón con tu acceso al canal."
+      },
+      "cancel": {
+        "q": "¿Puedo cancelar cuando quiera?",
+        "a": "Sí. No hay permanencia: si no renuevas, el acceso caduca y ya está."
+      },
+      "guarantee": {
+        "q": "¿Esto garantiza ganancias?",
+        "a": "No. Es un servicio de análisis e información. Las apuestas implican riesgo de pérdida. Compartimos método, criterio y datos reales, no promesas de beneficio."
+      }
+    }
+  },
+  "marketing": {
+    "instagram_cta": "Prueba el premium {trial_days} días gratis desde el enlace de la bio.",
+    "educativo": "Así trabajamos antes de publicar un pick: lectura de partido, estadística de contexto y gestión responsable del riesgo. No buscamos el pelotazo, buscamos método y constancia.",
+    "urgencia": "⏳ Esta semana abrimos nuevas pruebas de {trial_days} días\n\nBuen momento para probar el premium sin pagar nada por adelantado.",
+    "social_intro": "Datos reales, sin retoques. Compruébalo tú mismo.",
+    "footer": "{website_url}  ·  {instagram_handle}"
+  }
+}

@@ -1,0 +1,216 @@
+{
+  "$schema": "./product.schema.json",
+  "version": 1,
+
+  "brand": {
+    "name": "Erikenobi Picks",
+    "premium_name": "Erikenobi Picks Premium",
+    "website_url": "https://www.erikenobipicks.com",
+    "support_contact": "@erikenobi",
+    "support_url": "https://t.me/erikenobi",
+    "bot_username": "erikenobi_premiumbot",
+    "bot_url": "https://t.me/erikenobi_premiumbot",
+    "instagram_handle": "@erikenobipicks",
+    "instagram_url": "https://www.instagram.com/erikenobipicks"
+  },
+
+  "compliance": {
+    "min_age": 18,
+    "responsible_gambling_url": "https://www.jugarbien.es",
+    "forbidden_phrases": [
+      "dinero seguro",
+      "ganancia garantizada",
+      "ganancias garantizadas",
+      "beneficio garantizado",
+      "te haces rico",
+      "sin riesgo",
+      "100% seguro",
+      "apuesta segura"
+    ]
+  },
+
+  "currency": "EUR",
+  "timezone": "Europe/Madrid",
+
+  "payment_methods": [
+    { "id": "stripe",  "display_name": "Tarjeta (Stripe)", "kind": "link",   "value": null },
+    { "id": "paypal",  "display_name": "PayPal",           "kind": "link",   "value": "https://paypal.me/erikenobi" },
+    { "id": "bizum",   "display_name": "Bizum",            "kind": "phone",  "value": "+34660426660" },
+    { "id": "revolut", "display_name": "Revolut",          "kind": "link",   "value": "https://revolut.me/ericblasco9" }
+  ],
+
+  "access": {
+    "plan_interval_days": 30,
+    "invite_expiry_hours": 24,
+    "max_access_generations_per_period": 6,
+    "referral": {
+      "enabled": true,
+      "referrer_bonus_days": 15,
+      "referred_multiplier": 1
+    }
+  },
+
+  "tracking": {
+    "default_utm_campaign": "trial_7d",
+    "start_param_max_length": 64,
+    "start_param_format": "{intent}__src-{source}__vrt-{vertical}__cmp-{campaign}__cnt-{content}",
+    "start_param_token_order": ["src", "vrt", "cmp", "cnt"]
+  },
+
+  "products": {
+    "futbol": {
+      "display_name": "Fútbol",
+      "vertical": "futbol",
+      "telegram_channel_free": "https://t.me/+WhIkP2PstS1kMDVk",
+      "telegram_channel_premium": null,
+      "stats_url": "https://www.erikenobipicks.com/#estadisticas",
+
+      "channels": {
+        "free_primary": -1002973101273,
+        "free_secondary": -1002037791209,
+        "premium_goles": -1003818905455,
+        "premium_corners": -1003895151594,
+        "premium_pre_over25": -1003837149453,
+        "premium_pre_carlos_mollar": -1003774898516,
+        "premium_pre_general": -1003959149689,
+        "premium_pre_over15ht": -1004244147250
+      },
+
+      "markets": [
+        { "id": "goles",       "display_name": "Goles",       "live": true },
+        { "id": "corners",     "display_name": "Córners",     "live": true },
+        { "id": "over_2_5_ft", "display_name": "Over 2.5 FT", "live": false,
+          "advance_hours_max": 12, "reminder_minutes_before": 5 },
+        { "id": "over_1_5_ht", "display_name": "Over 1.5 HT", "live": false }
+      ],
+
+      "free_tier": {
+        "picks_per_day": 4,
+        "picks_per_day_by_market": { "goles": 2, "corners": 2 },
+        "extra_quota_by_market": { "over_2_5_ft": 1 },
+        "max_one_per_hour_per_market": true,
+        "shows_match_names": true,
+        "delayed_publication_hours": 0,
+        "publication_hours": { "start": 10, "end": 22 },
+        "cta_every_n_picks": 3,
+        "cta_trial_probability": 0.4,
+        "promo_hours": [13, 18],
+        "recurring_promo_hours": [20]
+      },
+
+      "premium_tier": {
+        "daily_limit": null,
+        "includes_stake": true,
+        "publication_advance_minutes": 0
+      },
+
+      "trial": {
+        "enabled": true,
+        "duration_days": 7,
+        "repeatable": false
+      },
+
+      "plans": [
+        {
+          "id": "goles", "display_name": "GOLES", "amount_cents": 2000,
+          "markets": ["goles"], "trial_enabled": true, "public": true,
+          "provider": "stripe",
+          "provider_payment_link": "https://buy.stripe.com/aFa8wObuQ9MbdgA00x08g01"
+        },
+        {
+          "id": "corners", "display_name": "CORNERS", "amount_cents": 2000,
+          "markets": ["corners"], "trial_enabled": true, "public": true,
+          "provider": "stripe",
+          "provider_payment_link": "https://buy.stripe.com/bJe3cugPaf6vdgA5kR08g02"
+        },
+        {
+          "id": "combo", "display_name": "COMBO", "amount_cents": 3000,
+          "markets": ["goles", "corners"], "trial_enabled": true, "public": true,
+          "provider": "stripe",
+          "provider_payment_link": "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
+        },
+        {
+          "id": "pre", "display_name": "PREPARTIDO", "amount_cents": 2000,
+          "markets": ["over_2_5_ft"], "trial_enabled": true, "public": true,
+          "provider": "stripe",
+          "provider_payment_link": "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
+        }
+      ]
+    },
+
+    "pinpon": {
+      "display_name": "Ping Pong",
+      "vertical": "pinpon",
+      "telegram_channel_free": "https://t.me/+PIREb9LtUqM5ZWZk",
+      "telegram_channel_premium": null,
+      "stats_url": "https://www.erikenobipicks.com/#estadisticas",
+
+      "channels": {
+        "free_primary": -1004474092446,
+        "premium_official": -1004259041662,
+        "premium_mirror": -1004457922573,
+        "tracking_ttcup": -1004298922749
+      },
+
+      "leagues": [
+        { "name": "Czech Liga Pro",  "flag": "🇨🇿", "tracking_only": false },
+        { "name": "TT Elite Series", "flag": "🇵🇱", "tracking_only": false },
+        { "name": "TT Cup",          "flag": "🏓", "tracking_only": true }
+      ],
+
+      "method": {
+        "stake_game_2": "1u",
+        "stake_game_3": "3u",
+        "bookmakers": "Retabet · Bwin · Bet365 · 1xBet (solo Rep. Checa) · Winamax",
+        "alert_minutes_before": 5,
+        "min_streak_to_show": 3
+      },
+
+      "free_tier": {
+        "mode": "completo",
+        "picks_per_day": null,
+        "shows_match_names": true,
+        "delayed_publication_hours": 0,
+        "reveal_minutes_before": 5,
+        "modes": {
+          "completo": { "picks_per_day": null, "shows_match_names": true },
+          "reducido": { "picks_per_day": 2,    "shows_match_names": false },
+          "off":      { "picks_per_day": 0,    "shows_match_names": false }
+        },
+        "promo_hours": [20],
+        "win_hype_enabled": true,
+        "win_hype_cooldown_minutes": 20,
+        "mirror_to_futbol_free": true
+      },
+
+      "premium_tier": {
+        "daily_limit": null,
+        "includes_stake": true,
+        "publication_advance_minutes": 0
+      },
+
+      "trial": {
+        "enabled": true,
+        "duration_days": 3,
+        "repeatable": false
+      },
+
+      "plans": [
+        {
+          "id": "pinpon", "display_name": "PING PONG", "amount_cents": 5000,
+          "markets": [], "trial_enabled": true, "public": true,
+          "provider": "stripe",
+          "provider_payment_link": "https://buy.stripe.com/6oUcN4gPa2jJb8s8x308g05"
+        }
+      ]
+    }
+  },
+
+  "bundles": [
+    {
+      "id": "total", "display_name": "TOTAL", "amount_cents": 9000,
+      "products": ["futbol", "pinpon"], "trial_enabled": false, "public": false,
+      "provider": null, "provider_payment_link": null
+    }
+  ]
+}

@@ -1,0 +1,377 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://www.erikenobipicks.com/schema/product.schema.json",
+  "title": "Erikenobi Picks — configuración de producto",
+  "description": "Fuente única de verdad de precios, límites, identidad y valores legales. Sin secretos: este fichero debe poder publicarse sin riesgo.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "brand", "compliance", "currency", "timezone", "payment_methods", "access", "tracking", "products"],
+
+  "$defs": {
+    "nonNegativeInt": { "type": "integer", "minimum": 0 },
+    "positiveInt": { "type": "integer", "minimum": 1 },
+    "probability": { "type": "number", "minimum": 0, "maximum": 1 },
+    "hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+    "hourList": { "type": "array", "items": { "$ref": "#/$defs/hour" }, "uniqueItems": true },
+    "httpsUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
+    "telegramInviteUrl": { "type": "string", "pattern": "^https://t\\.me/" },
+    "telegramChatId": {
+      "type": "integer",
+      "maximum": -1,
+      "description": "ID numérico de canal/supergrupo de Telegram (siempre negativo)."
+    },
+    "slug": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display_name", "amount_cents", "trial_enabled", "public", "provider", "provider_payment_link"],
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "display_name": { "type": "string", "minLength": 1 },
+        "amount_cents": {
+          "$ref": "#/$defs/nonNegativeInt",
+          "description": "Importe en céntimos. NUNCA se guarda el precio ya formateado: se calcula siempre desde amount_cents + currency."
+        },
+        "markets": { "type": "array", "items": { "$ref": "#/$defs/slug" }, "uniqueItems": true },
+        "trial_enabled": { "type": "boolean" },
+        "public": {
+          "type": "boolean",
+          "description": "false = no aparece en el menú ni en la web; se asigna a mano."
+        },
+        "provider": { "type": ["string", "null"], "enum": ["stripe", null] },
+        "provider_payment_link": {
+          "anyOf": [{ "$ref": "#/$defs/httpsUrl" }, { "type": "null" }],
+          "description": "Payment Link del proveedor. No es un price_id: hoy el cobro es manual y el importe vive en el panel del proveedor. El arranque solo comprueba que el enlace responde (ver shared/README.md)."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "public": { "const": true } }, "required": ["public"] },
+          "then": { "properties": { "amount_cents": { "$ref": "#/$defs/positiveInt" } } }
+        },
+        {
+          "if": { "properties": { "provider": { "const": "stripe" } }, "required": ["provider"] },
+          "then": { "properties": { "provider_payment_link": { "$ref": "#/$defs/httpsUrl" } }, "required": ["provider_payment_link"] }
+        }
+      ]
+    },
+
+    "freeTierMode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["picks_per_day", "shows_match_names"],
+      "properties": {
+        "picks_per_day": {
+          "anyOf": [{ "$ref": "#/$defs/nonNegativeInt" }, { "type": "null" }],
+          "description": "null = sin tope (el free recibe todos los picks). 0 = el free no recibe picks."
+        },
+        "shows_match_names": { "type": "boolean" }
+      }
+    },
+
+    "premiumTier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["daily_limit", "includes_stake", "publication_advance_minutes"],
+      "properties": {
+        "daily_limit": { "anyOf": [{ "$ref": "#/$defs/nonNegativeInt" }, { "type": "null" }] },
+        "includes_stake": { "type": "boolean" },
+        "publication_advance_minutes": { "$ref": "#/$defs/nonNegativeInt" }
+      }
+    },
+
+    "trial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "duration_days", "repeatable"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "duration_days": { "$ref": "#/$defs/nonNegativeInt" },
+        "repeatable": { "type": "boolean" }
+      },
+      "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+      "then": { "properties": { "duration_days": { "$ref": "#/$defs/positiveInt" } } }
+    },
+
+    "productBase": {
+      "type": "object",
+      "required": ["display_name", "vertical", "telegram_channel_free", "telegram_channel_premium", "stats_url", "channels", "free_tier", "premium_tier", "trial", "plans"],
+      "properties": {
+        "display_name": { "type": "string", "minLength": 1 },
+        "vertical": { "$ref": "#/$defs/slug" },
+        "telegram_channel_free": { "anyOf": [{ "$ref": "#/$defs/telegramInviteUrl" }, { "type": "null" }] },
+        "telegram_channel_premium": {
+          "anyOf": [{ "$ref": "#/$defs/telegramInviteUrl" }, { "type": "null" }],
+          "description": "null = no hay enlace público; el acceso se concede con una invitación por usuario tras el pago."
+        },
+        "stats_url": { "$ref": "#/$defs/httpsUrl" },
+        "channels": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/telegramChatId" },
+          "propertyNames": { "$ref": "#/$defs/slug" }
+        },
+        "premium_tier": { "$ref": "#/$defs/premiumTier" },
+        "trial": { "$ref": "#/$defs/trial" },
+        "plans": { "type": "array", "items": { "$ref": "#/$defs/plan" }, "minItems": 1 }
+      }
+    }
+  },
+
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "$ref": "#/$defs/positiveInt" },
+
+    "brand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "premium_name", "website_url", "support_contact", "support_url", "bot_username", "bot_url", "instagram_handle", "instagram_url"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "premium_name": { "type": "string", "minLength": 1 },
+        "website_url": {
+          "allOf": [{ "$ref": "#/$defs/httpsUrl" }],
+          "pattern": "^https://www\\.",
+          "description": "Dominio canónico, con www. Todo deep-link debe apuntar aquí: el redirect www/no-www descarta los parámetros UTM y rompe la atribución."
+        },
+        "support_contact": { "type": "string", "pattern": "^@[A-Za-z0-9_]{4,}$" },
+        "support_url": { "$ref": "#/$defs/telegramInviteUrl" },
+        "bot_username": { "type": "string", "pattern": "^[A-Za-z0-9_]{4,}$" },
+        "bot_url": { "$ref": "#/$defs/telegramInviteUrl" },
+        "instagram_handle": { "type": "string", "pattern": "^@[A-Za-z0-9_.]+$" },
+        "instagram_url": { "$ref": "#/$defs/httpsUrl" }
+      }
+    },
+
+    "compliance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_age", "responsible_gambling_url", "forbidden_phrases"],
+      "properties": {
+        "min_age": { "$ref": "#/$defs/positiveInt" },
+        "responsible_gambling_url": { "$ref": "#/$defs/httpsUrl" },
+        "forbidden_phrases": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "description": "Frases que nunca deben aparecer en el contenido generado."
+        }
+      }
+    },
+
+    "currency": { "type": "string", "enum": ["EUR"] },
+    "timezone": { "type": "string", "minLength": 1 },
+
+    "payment_methods": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "display_name", "kind", "value"],
+        "properties": {
+          "id": { "$ref": "#/$defs/slug" },
+          "display_name": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "enum": ["link", "phone"] },
+          "value": {
+            "type": ["string", "null"],
+            "description": "null = el valor depende del plan (Stripe usa el payment link de cada plan)."
+          }
+        },
+        "if": { "properties": { "kind": { "const": "phone" } }, "required": ["kind"] },
+        "then": { "properties": { "value": { "type": "string", "pattern": "^\\+[0-9]{6,15}$" } } }
+      }
+    },
+
+    "access": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan_interval_days", "invite_expiry_hours", "max_access_generations_per_period", "referral"],
+      "properties": {
+        "plan_interval_days": { "$ref": "#/$defs/positiveInt" },
+        "invite_expiry_hours": { "$ref": "#/$defs/positiveInt" },
+        "max_access_generations_per_period": { "$ref": "#/$defs/positiveInt" },
+        "referral": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "referrer_bonus_days", "referred_multiplier"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "referrer_bonus_days": { "$ref": "#/$defs/nonNegativeInt" },
+            "referred_multiplier": { "type": "number", "minimum": 0 }
+          }
+        }
+      }
+    },
+
+    "tracking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default_utm_campaign", "start_param_max_length", "start_param_format", "start_param_token_order"],
+      "properties": {
+        "default_utm_campaign": { "type": "string", "minLength": 1 },
+        "start_param_max_length": { "$ref": "#/$defs/positiveInt" },
+        "start_param_format": {
+          "type": "string",
+          "pattern": "vrt-\\{vertical\\}",
+          "description": "El deep-link debe llevar origen Y vertical. El patrón exige el token vrt-."
+        },
+        "start_param_token_order": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["src", "vrt", "cmp", "cnt"] },
+          "uniqueItems": true,
+          "contains": { "const": "vrt" },
+          "description": "Orden de truncado: los primeros sobreviven al límite de 64 caracteres, así que src y vrt van antes que cmp y cnt."
+        }
+      }
+    },
+
+    "products": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["futbol", "pinpon"],
+      "properties": {
+        "futbol": {
+          "allOf": [{ "$ref": "#/$defs/productBase" }],
+          "unevaluatedProperties": false,
+          "required": ["markets"],
+          "properties": {
+            "markets": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "display_name", "live"],
+                "properties": {
+                  "id": { "$ref": "#/$defs/slug" },
+                  "display_name": { "type": "string", "minLength": 1 },
+                  "live": { "type": "boolean" },
+                  "advance_hours_max": { "$ref": "#/$defs/positiveInt" },
+                  "reminder_minutes_before": { "$ref": "#/$defs/nonNegativeInt" }
+                }
+              }
+            },
+            "free_tier": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["picks_per_day", "picks_per_day_by_market", "max_one_per_hour_per_market", "shows_match_names", "delayed_publication_hours", "publication_hours"],
+              "properties": {
+                "picks_per_day": { "$ref": "#/$defs/nonNegativeInt" },
+                "picks_per_day_by_market": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "additionalProperties": { "$ref": "#/$defs/nonNegativeInt" },
+                  "propertyNames": { "$ref": "#/$defs/slug" }
+                },
+                "extra_quota_by_market": {
+                  "type": "object",
+                  "additionalProperties": { "$ref": "#/$defs/nonNegativeInt" },
+                  "propertyNames": { "$ref": "#/$defs/slug" },
+                  "description": "Cupos que NO consumen de picks_per_day."
+                },
+                "max_one_per_hour_per_market": { "type": "boolean" },
+                "shows_match_names": { "type": "boolean" },
+                "delayed_publication_hours": { "$ref": "#/$defs/nonNegativeInt" },
+                "publication_hours": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["start", "end"],
+                  "properties": { "start": { "$ref": "#/$defs/hour" }, "end": { "$ref": "#/$defs/hour" } }
+                },
+                "cta_every_n_picks": { "$ref": "#/$defs/positiveInt" },
+                "cta_trial_probability": { "$ref": "#/$defs/probability" },
+                "promo_hours": { "$ref": "#/$defs/hourList" },
+                "recurring_promo_hours": { "$ref": "#/$defs/hourList" }
+              }
+            }
+          }
+        },
+
+        "pinpon": {
+          "allOf": [{ "$ref": "#/$defs/productBase" }],
+          "unevaluatedProperties": false,
+          "required": ["leagues", "method"],
+          "properties": {
+            "leagues": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "flag", "tracking_only"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "flag": { "type": "string", "minLength": 1 },
+                  "tracking_only": {
+                    "type": "boolean",
+                    "description": "true = liga de seguimiento: se publica sin apuesta ni cuota."
+                  }
+                }
+              }
+            },
+            "method": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["stake_game_2", "stake_game_3", "bookmakers", "alert_minutes_before", "min_streak_to_show"],
+              "properties": {
+                "stake_game_2": { "type": "string", "minLength": 1 },
+                "stake_game_3": { "type": "string", "minLength": 1 },
+                "bookmakers": { "type": "string", "minLength": 1 },
+                "alert_minutes_before": { "$ref": "#/$defs/nonNegativeInt" },
+                "min_streak_to_show": { "$ref": "#/$defs/nonNegativeInt" }
+              }
+            },
+            "free_tier": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["mode", "picks_per_day", "shows_match_names", "delayed_publication_hours", "reveal_minutes_before", "modes"],
+              "properties": {
+                "mode": { "type": "string", "enum": ["completo", "reducido", "off"] },
+                "picks_per_day": { "anyOf": [{ "$ref": "#/$defs/nonNegativeInt" }, { "type": "null" }] },
+                "shows_match_names": { "type": "boolean" },
+                "delayed_publication_hours": { "$ref": "#/$defs/nonNegativeInt" },
+                "reveal_minutes_before": { "$ref": "#/$defs/nonNegativeInt" },
+                "modes": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["completo", "reducido", "off"],
+                  "properties": {
+                    "completo": { "$ref": "#/$defs/freeTierMode" },
+                    "reducido": { "$ref": "#/$defs/freeTierMode" },
+                    "off": { "$ref": "#/$defs/freeTierMode" }
+                  }
+                },
+                "promo_hours": { "$ref": "#/$defs/hourList" },
+                "win_hype_enabled": { "type": "boolean" },
+                "win_hype_cooldown_minutes": { "$ref": "#/$defs/nonNegativeInt" },
+                "mirror_to_futbol_free": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "bundles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "display_name", "amount_cents", "products", "trial_enabled", "public", "provider", "provider_payment_link"],
+        "properties": {
+          "id": { "$ref": "#/$defs/slug" },
+          "display_name": { "type": "string", "minLength": 1 },
+          "amount_cents": { "$ref": "#/$defs/nonNegativeInt" },
+          "products": { "type": "array", "items": { "$ref": "#/$defs/slug" }, "minItems": 1, "uniqueItems": true },
+          "trial_enabled": { "type": "boolean" },
+          "public": { "type": "boolean" },
+          "provider": { "type": ["string", "null"], "enum": ["stripe", null] },
+          "provider_payment_link": { "anyOf": [{ "$ref": "#/$defs/httpsUrl" }, { "type": "null" }] }
+        }
+      }
+    }
+  }
+}
