@@ -17,6 +17,14 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      - name: Set up Node
+        # El test de paridad entre los cargadores Python y JavaScript necesita
+        # node. Se instala explícitamente para que la guarda no pueda
+        # desaparecer en silencio si cambia la imagen del runner.
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

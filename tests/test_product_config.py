@@ -223,12 +223,19 @@ process.stdout.write(JSON.stringify(salida));
 """
 
 
-@pytest.mark.skipif(NODE is None, reason="node no está disponible")
 def test_los_dos_cargadores_dan_lo_mismo():
     """
     Dos cargadores que divergen son dos fuentes de verdad disfrazadas de una.
     Se resuelve cada clave con cada contexto en ambos y se comparan.
+
+    En CI esto NO se salta: un skip silencioso es una guarda que desaparece sin
+    avisar. En local sí, para no exigir node a quien solo toca Python.
     """
+    if NODE is None:
+        if os.environ.get("CI"):
+            pytest.fail("node no está disponible en CI; la guarda de paridad no se ejecutaría")
+        pytest.skip("node no está disponible (en CI sería un fallo)")
+
     casos, esperados = [], []
     for clave, es_lista in _claves_de_texto():
         for contexto in _contextos():
