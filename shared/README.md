@@ -21,6 +21,56 @@ Edita siempre el canónico.
 
 ---
 
+## Cargadores
+
+Uno por stack. Ambos leen el JSON **una sola vez**, resuelven los marcadores y
+**lanzan error si queda alguno sin resolver**. El precio mostrable se deriva
+siempre de `amount_cents`; nunca se almacena formateado.
+
+```python
+from shared import product_config as cfg
+
+cfg.verify_startup()                                  # al arrancar el servicio
+cfg.price("goles")                                    # '20€'
+cfg.legal("short")                                    # aviso legal canónico
+cfg.text("trial.cta_button", product="pinpon")        # '🎁 Probar gratis 3 días'
+cfg.texts("products.futbol.free.cta_pick_variants", product="futbol")
+cfg.bot_deep_link("trial_7d", "free_channel", "futbol")
+```
+
+```js
+// El servidor embebe la config validada en la página:
+//   <script type="application/json" id="product-config">{"product":…,"copy":…}</script>
+ProductConfig.price("goles");
+ProductConfig.text("trial.cta_button", { product: "pinpon" });
+ProductConfig.botDeepLink("trial_7d", "instagram", "pinpon");
+```
+
+**`verify_startup()` es obligatorio en el arranque de cada servicio.** Valida
+contra el esquema y, si falla, lanza `ConfigError` y el proceso no arranca.
+Con `check_payment_links=True` comprueba además que cada Payment Link responde
+(ver el procedimiento de precios más abajo). El cargador de JavaScript **no**
+valida contra el esquema a propósito: recibe una config que el servidor ya
+validó, y embarcar el validador en el navegador solo añadiría peso.
+
+Un test compara la salida de los dos cargadores clave a clave. Dos cargadores
+que divergen son dos fuentes de verdad disfrazadas de una.
+
+---
+
+## Sincronización entre repos
+
+El canónico es **`telegram-payments`**. Los otros dos llevan una copia literal;
+**nadie edita la copia**.
+
+```
+python -m shared.sync --to    ../erikenobi-telegram-bot   # propagar
+python -m shared.sync --check ../erikenobi-telegram-bot   # guarda (código 1 si difiere)
+python -m shared.sync --print-test                        # test para el repo copia
+```
+
+---
+
 ## Cambiar un precio (procedimiento manual)
 
 Hoy el cobro **no** está automatizado: son *Payment Links* de Stripe y la
