@@ -69,7 +69,7 @@
     "reminder": "🎁 Pruébalo {trial_days} días GRATIS — sin tarjeta, sin compromiso.",
     "conditions": "Sin tarjeta por adelantado · una prueba por persona · te vas cuando quieras.",
     "faq_question": "¿Cómo funciona la prueba de {trial_days_futbol} días?",
-    "faq_answer": "Eliges un plan en el bot y activas la prueba sin pagar nada por adelantado. Tienes acceso completo durante {trial_days_futbol} días ({trial_days_pinpon} días en Ping Pong). Una prueba por persona."
+    "faq_answer": "Eliges un plan en el bot y activas la prueba sin pagar nada por adelantado. Tienes acceso completo durante {trial_days_futbol} días ({trial_days_pinpon} días en Ping Pong). Si encaja contigo, sigues; si no, no haces nada. Una prueba por persona."
   },
   "access": {
     "invite_expiry": "⏱ El enlace caduca en {invite_expiry_hours}h. Si caduca, pulsa el botón para generar otro.",
@@ -146,7 +146,7 @@
           "description": "Goles y córners juntos, a mejor precio. El pack completo."
         },
         "pre": {
-          "description": "Over 2.5 a mano, partido a partido, con aviso antes del inicio. Canal independiente."
+          "description": "Over 2.5 a mano, partido a partido, con aviso {reminder_minutes_before} min antes."
         }
       },
       "que_plan": {
@@ -215,7 +215,7 @@
       },
       "guarantee": {
         "q": "¿Esto garantiza ganancias?",
-        "a": "No. Es un servicio de análisis e información. Las apuestas implican riesgo de pérdida. Compartimos método, criterio y datos reales, no promesas de beneficio."
+        "a": "No. Es un servicio de análisis e información. Las apuestas implican riesgo de pérdida. Comparto método, criterio y datos reales, no promesas de beneficio."
       }
     },
     "meta": {
