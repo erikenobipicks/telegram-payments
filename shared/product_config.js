@@ -13,9 +13,12 @@
  *
  * Uso: el servidor embebe la config en la página
  *
- *   <script type="application/json" id="product-config">{"product":…,"copy":…}</script>
+ *   <script type="application/json" id="product-config">{"product":…}</script>
  *
- * y este módulo la lee la primera vez que se le pide algo.
+ * y este módulo la lee la primera vez que se le pide algo. `copy` es OPCIONAL:
+ * una página que renderiza sus textos en el servidor (por SEO) solo necesita
+ * `product`, y embarcar copy.es.json serían 17 KB de peso muerto por carga.
+ * Si falta y se pide un texto, el error lo dice.
  */
 (function (global) {
   "use strict";
@@ -44,8 +47,8 @@
     } catch (e) {
       throw ConfigError("product-config no es JSON válido: " + e.message);
     }
-    if (!datos || !datos.product || !datos.copy) {
-      throw ConfigError("product-config debe traer las claves 'product' y 'copy'");
+    if (!datos || !datos.product) {
+      throw ConfigError("product-config debe traer la clave 'product'");
     }
     cache = datos;
     return cache;
@@ -53,8 +56,8 @@
 
   /** Permite inyectar la config a mano (tests, o render sin <script>). */
   function init(datos) {
-    if (!datos || !datos.product || !datos.copy) {
-      throw ConfigError("init() necesita {product, copy}");
+    if (!datos || !datos.product) {
+      throw ConfigError("init() necesita al menos {product}");
     }
     cache = datos;
     return cache;
@@ -65,7 +68,14 @@
   }
 
   function copy() {
-    return cargar().copy;
+    var textos = cargar().copy;
+    if (!textos) {
+      throw ConfigError(
+        "esta página no embebe copy.es.json; sus textos se resuelven en el " +
+          "servidor. Si necesitas resolverlos en el cliente, inyecta 'copy'."
+      );
+    }
+    return textos;
   }
 
   function producto(vertical) {
