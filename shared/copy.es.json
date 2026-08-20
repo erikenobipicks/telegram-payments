@@ -207,15 +207,19 @@
       },
       "access": {
         "q": "¿Cómo entro al canal después de pagar?",
-        "a": "Tras el pago, envías la captura del comprobante en el chat del bot. En cuanto validamos el pago recibes un botón con tu acceso al canal."
+        "a": "Tras el pago, envías la captura del comprobante en el chat del bot. En cuanto valido el pago (normalmente el mismo día) recibes un botón con tu acceso al canal."
       },
       "cancel": {
         "q": "¿Puedo cancelar cuando quiera?",
-        "a": "Sí. No hay permanencia: si no renuevas, el acceso caduca y ya está."
+        "a": "Sí. No hay permanencia: si no renuevas, el acceso caduca y ya está. Sin ataduras."
       },
       "guarantee": {
         "q": "¿Esto garantiza ganancias?",
         "a": "No. Es un servicio de análisis e información. Las apuestas implican riesgo de pérdida. Comparto método, criterio y datos reales, no promesas de beneficio."
+      },
+      "pinpon": {
+        "q": "¿Qué es el método ping pong?",
+        "a": "Picks de tenis de mesa en directo con una progresión de apuesta concreta por partido. Canal premium independiente, con su propio seguimiento de resultados y unidades."
       }
     },
     "meta": {
