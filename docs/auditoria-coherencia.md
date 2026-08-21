@@ -501,12 +501,21 @@ posterior y separado. Las dos únicas excepciones que sí cambian producción so
 |---|---|
 | D1 | Repo canónico **`telegram-payments`**, copia sincronizada por CI y test de guardia que falla si una copia diverge. |
 | D2 | Solo se comprueba que el Payment Link responde. El procedimiento manual de cambio de precio (**Stripe primero, `product.json` después, el mismo día**) queda documentado en `shared/README.md`. |
-| D3 | `landing-ventas` **no se borra**: 301 de todas sus rutas al canónico y archivar el repo. **Bloqueada** — ver abajo. |
+| D3 | `landing-ventas` **borrada** (PR #222, −2882 líneas). Era la landing de abril, reemplazada el 9 de abril por el árbol de enlaces que creció hasta la actual; nunca se desplegó por separado. Resuelta por arqueología de git — ver abajo. |
 
-### D3 — verificación previa al redirect: BLOQUEADA
+### D3 — resuelta: `landing-ventas` era una versión anterior, no un sitio aparte
 
-Antes del 301 había que verificar tres cosas. Ninguna sale positiva, pero **dos no
-se pueden verificar desde el código**, así que el redirect **no se ha hecho**:
+**Estado final: borrada.** El bloqueo se levantó por el historial de git, no por
+la analítica: `landing-ventas` es la landing de abril de 2026, sustituida el 9 de
+abril por el árbol de enlaces que fue creciendo hasta la landing actual. Comparten
+el `<title>` y un 95 % del texto visible. Nunca tuvo despliegue propio, así que no
+había ninguna URL viva que redirigir ni tráfico que preservar.
+
+Se documenta abajo la verificación original porque explica por qué hizo falta la
+arqueología: dos de las tres comprobaciones no se pueden hacer desde el código.
+
+Antes del 301 había que verificar tres cosas. Ninguna salía positiva, pero **dos no
+se podían verificar desde el código**:
 
 | # | Comprobación | Resultado |
 |---|---|---|

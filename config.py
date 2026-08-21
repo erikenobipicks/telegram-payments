@@ -7,6 +7,16 @@ El estado mutable en memoria (rate limiting, avisos enviados) y BOT_USERNAME
 """
 import os
 
+from shared import product_config as cfg
+
+# Fuente única de verdad de precios, límites, identidad y textos legales.
+# Ver shared/README.md. Si product.json no cumple el esquema, esto lanza
+# ConfigError y el bot no arranca: mejor caer al inicio que cobrar mal.
+cfg.verify_startup()
+
+_FUTBOL = cfg.product("futbol")
+_PINPON = cfg.product("pinpon")
+
 # ── Secretos / entorno ──────────────────────────────────────────────────────
 TOKEN        = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -18,62 +28,76 @@ PICKS_DATABASE_URL = os.getenv("PICKS_DATABASE_URL")
 ADMIN_IDS = [9330181]
 
 # ── Canales de Telegram ─────────────────────────────────────────────────────
-CANAL_CORNERS_ID = -1003895151594
-CANAL_GOLES_ID   = -1003818905455
-CANAL_PRE_ID     = -1003837149453   # Over 2.5 FT prepartido — análisis manual
+CANAL_CORNERS_ID = _FUTBOL["channels"]["premium_corners"]
+CANAL_GOLES_ID   = _FUTBOL["channels"]["premium_goles"]
+# C5: en el bot de picks este canal se llama premium_pre_over25. El nombre
+# canónico vive ahora en shared/, así que "CANAL_PRE_ID" ya no significa dos
+# cosas distintas según el repo.
+CANAL_PRE_ID     = _FUTBOL["channels"]["premium_pre_over25"]
 
 # Ping pong (tenis de mesa) — canal premium independiente. Por defecto apunta
 # al canal OFICIAL de ping pong del bot de picks (-1004259041662); overridable
 # por entorno. Si valiera 0, el plan quedaría OCULTO en el menú y
 # get_plan_channels no devolvería canal (no se intenta invitar/expulsar).
 # NOTA: el bot de pagos debe ser ADMIN de ese canal (invitar y expulsar).
-CANAL_PINPON_ID  = int(os.getenv("CANAL_PINPON_ID", "-1004259041662") or "0")
+CANAL_PINPON_ID  = int(
+    os.getenv("CANAL_PINPON_ID") or _PINPON["channels"]["premium_official"]
+)
 
 # Enlace al canal FREE de ping pong (t.me/... público o de invitación). Aparece
 # un botón "🏓 Canal FREE Ping Pong" en el menú del bot. Overridable por entorno.
-PINPON_FREE_URL = (os.getenv("PINPON_FREE_URL") or "https://t.me/+PIREb9LtUqM5ZWZk").strip()
+PINPON_FREE_URL = (
+    os.getenv("PINPON_FREE_URL") or _PINPON["telegram_channel_free"]
+).strip()
 
-LINK_FREE = "https://t.me/+WhIkP2PstS1kMDVk"
+LINK_FREE = _FUTBOL["telegram_channel_free"]
 
 # ── Precios y métodos de pago ───────────────────────────────────────────────
-PRECIO_GOLES   = "20€"
-PRECIO_CORNERS = "20€"
-PRECIO_COMBO   = "30€"
-PRECIO_PRE     = "20€"
-PRECIO_PINPON  = "50€"
+# Se calculan siempre desde amount_cents + currency: el precio formateado no se
+# almacena en ningún sitio. Cambiar un precio se hace en shared/product.json,
+# y en el panel de Stripe el mismo día (ver shared/README.md).
+PRECIO_GOLES   = cfg.price("goles")
+PRECIO_CORNERS = cfg.price("corners")
+PRECIO_COMBO   = cfg.price("combo")
+PRECIO_PRE     = cfg.price("pre")
+PRECIO_PINPON  = cfg.price("pinpon")
 
-# Planes que ofrecen prueba gratis. Ping pong (50€) también ofrece prueba:
-# 3 días son más que suficientes para un método con ~90% de acierto.
-TRIAL_PLANS = ("goles", "corners", "combo", "pre", "pinpon")
+# Planes que ofrecen prueba gratis, según lo declarado en shared/.
+TRIAL_PLANS = tuple(
+    plan["id"]
+    for producto in cfg.config()["products"].values()
+    for plan in producto["plans"]
+    if plan["trial_enabled"]
+)
 
-BIZUM        = "+34660426660"
-PAYPAL_LINK  = "https://paypal.me/erikenobi"
-REVOLUT_LINK = "https://revolut.me/ericblasco9"
+_METODOS = {m["id"]: m["value"] for m in cfg.config()["payment_methods"]}
+BIZUM        = _METODOS["bizum"]
+PAYPAL_LINK  = _METODOS["paypal"]
+REVOLUT_LINK = _METODOS["revolut"]
 
-STRIPE_GOLES   = "https://buy.stripe.com/aFa8wObuQ9MbdgA00x08g01"
-STRIPE_CORNERS = "https://buy.stripe.com/bJe3cugPaf6vdgA5kR08g02"
-STRIPE_COMBO   = "https://buy.stripe.com/4gM7sK8iE0bBgsMfZv08g03"
-STRIPE_PRE     = "https://buy.stripe.com/aFafZg9mI6zZccw00x08g04"
-# Enlace de pago de Ping Pong (50€). Overridable por entorno; si quedara vacío,
-# el bot no muestra el botón de tarjeta (PayPal/Bizum/Revolut siguen disponibles).
-STRIPE_PINPON  = os.getenv("STRIPE_PINPON", "https://buy.stripe.com/6oUcN4gPa2jJb8s8x308g05")
+STRIPE_GOLES   = cfg.plan("goles")["provider_payment_link"]
+STRIPE_CORNERS = cfg.plan("corners")["provider_payment_link"]
+STRIPE_COMBO   = cfg.plan("combo")["provider_payment_link"]
+STRIPE_PRE     = cfg.plan("pre")["provider_payment_link"]
+# Overridable por entorno; si quedara vacío, el bot no muestra el botón de
+# tarjeta (PayPal/Bizum/Revolut siguen disponibles).
+STRIPE_PINPON  = os.getenv("STRIPE_PINPON", cfg.plan("pinpon")["provider_payment_link"])
 
 # ── Suscripciones / trials / accesos ────────────────────────────────────────
-PLAN_DAYS    = 30
-# Duración de la prueba gratuita POR PRODUCTO. Fútbol (goles/córners/combo/pre)
-# y Over 2.5 → 7 días; Ping Pong → 3 días. Parametrizables por entorno. Solo
-# afectan a trials NUEVOS: los ya activos conservan su fecha_fin.
-TRIAL_DAYS        = int(os.getenv("TRIAL_DAYS", "7"))
-PINPON_TRIAL_DAYS = int(os.getenv("PINPON_TRIAL_DAYS", "3"))
+PLAN_DAYS    = cfg.config()["access"]["plan_interval_days"]
+# Duración de la prueba gratuita POR PRODUCTO. Solo afecta a trials NUEVOS:
+# los ya activos conservan su fecha_fin.
+TRIAL_DAYS        = _FUTBOL["trial"]["duration_days"]
+PINPON_TRIAL_DAYS = _PINPON["trial"]["duration_days"]
 # Validez del enlace de invitación (horas). Antes 1h — demasiado corto: si el
-# usuario no lo abría a tiempo, caducaba y quemaba intentos. Ahora 24h.
-INVITE_EXPIRY_HOURS = int(os.getenv("INVITE_EXPIRY_HOURS", "24"))
+# usuario no lo abría a tiempo, caducaba y quemaba intentos.
+INVITE_EXPIRY_HOURS = cfg.config()["access"]["invite_expiry_hours"]
 
 # Referidos: el referidor gana REFERIDOR_DIAS gratis por cada amigo que se
-# suscriba. El recomendado NO recibe días extra (multiplicador 1): se regalaba
-# demasiado en un servicio con ~90% de acierto.
-REFERIDOR_DIAS = 15
-REFERIDO_MULTIPLICADOR = 1
+# suscriba. El recomendado NO recibe días extra (multiplicador 1).
+_REFERIDOS = cfg.config()["access"]["referral"]
+REFERIDOR_DIAS = _REFERIDOS["referrer_bonus_days"]
+REFERIDO_MULTIPLICADOR = _REFERIDOS["referred_multiplier"]
 
 # Cada hora: reduce a ≤1h la ventana de acceso residual de un usuario ya
 # caducado (antes 12h). La expulsión es idempotente y, gracias al flag
@@ -86,7 +110,7 @@ REEXPULSION_RETRY_DAYS = 7
 # Máximo de enlaces de acceso que un usuario puede auto-generar por periodo
 # de suscripción. Limita el reparto de enlaces a terceros. El contador se
 # reinicia con cada aprobación/renovación/regalo (registrar_acceso_pendiente).
-MAX_GENERACIONES_ACCESO = int(os.getenv("MAX_GENERACIONES_ACCESO", "6"))
+MAX_GENERACIONES_ACCESO = cfg.config()["access"]["max_access_generations_per_period"]
 
 # Encuesta de SATISFACCIÓN (CSAT) a clientes ACTIVOS: se envía una sola vez,
 # tras NPS_DELAY_DAYS días desde el alta, en lotes de NPS_LOTE por barrido (cada
@@ -97,7 +121,7 @@ NPS_LOTE       = int(os.getenv("NPS_LOTE", "10"))
 NPS_HORA_MIN   = int(os.getenv("NPS_HORA_MIN", "11"))
 NPS_HORA_MAX   = int(os.getenv("NPS_HORA_MAX", "21"))
 
-TIMEZONE = "Europe/Madrid"
+TIMEZONE = cfg.config()["timezone"]
 
 DEPLOYMENT_COMMIT = (
     os.getenv("RAILWAY_GIT_COMMIT_SHA")

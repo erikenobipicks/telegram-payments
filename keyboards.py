@@ -13,10 +13,9 @@ from config import (
     STRIPE_GOLES,
     STRIPE_PINPON,
     STRIPE_PRE,
-    TRIAL_DAYS,
-    PINPON_TRIAL_DAYS,
     TRIAL_PLANS,
 )
+from shared import product_config as cfg
 
 
 def menu_markup() -> InlineKeyboardMarkup:
@@ -29,23 +28,25 @@ def menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📋 Guía de pago",     callback_data="guia")],
         [InlineKeyboardButton("⚽⛳ Canal FREE Goles y Córners", callback_data="free")],
         [
-            InlineKeyboardButton("⚽ GOLES — 20€",   callback_data="goles"),
-            InlineKeyboardButton("🚩 CORNERS — 20€", callback_data="corners"),
+            InlineKeyboardButton(f"⚽ GOLES — {cfg.price('goles')}",     callback_data="goles"),
+            InlineKeyboardButton(f"🚩 CORNERS — {cfg.price('corners')}", callback_data="corners"),
         ],
-        [InlineKeyboardButton("🔥 GOLES + CORNERS — 30€", callback_data="combo")],
-        [InlineKeyboardButton("📊 PREPARTIDO — 20€", callback_data="pre")],
+        [InlineKeyboardButton(f"🔥 GOLES + CORNERS — {cfg.price('combo')}", callback_data="combo")],
+        [InlineKeyboardButton(f"📊 PREPARTIDO — {cfg.price('pre')}", callback_data="pre")],
     ]
     # Botón al canal FREE de ping pong (si hay enlace configurado).
     if PINPON_FREE_URL:
         filas.append([InlineKeyboardButton("🏓 Canal FREE Ping Pong", url=PINPON_FREE_URL)])
     # El botón de Ping Pong (premium) solo aparece cuando su canal está configurado.
     if CANAL_PINPON_ID:
-        filas.append([InlineKeyboardButton("🏓 PING PONG — 50€", callback_data="pinpon")])
+        filas.append(
+            [InlineKeyboardButton(f"🏓 PING PONG — {cfg.price('pinpon')}", callback_data="pinpon")]
+        )
     filas += [
         [InlineKeyboardButton("🎁 Invitar amigos", callback_data="referido")],
         [
             InlineKeyboardButton("🔒 Privacidad", callback_data="privacidad"),
-            InlineKeyboardButton("💬 Contacto",   url="https://t.me/erikenobi"),
+            InlineKeyboardButton("💬 Contacto",   url=cfg.config()["brand"]["support_url"]),
         ],
     ]
     return InlineKeyboardMarkup(filas)
@@ -58,19 +59,23 @@ def volver_markup() -> InlineKeyboardMarkup:
 
 
 def pago_markup(plan: str) -> InlineKeyboardMarkup:
-    precios = {"goles": "20", "corners": "20", "combo": "30", "pre": "20", "pinpon": "50"}
     stripes = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO,
                "pre": STRIPE_PRE, "pinpon": STRIPE_PINPON}
-    importe = precios.get(plan, "")
+    # PayPal quiere el importe en la URL: se deriva de amount_cents, no de una
+    # tabla de precios paralela (era la tercera copia de los importes).
+    try:
+        importe = f"{cfg.plan(plan)['amount_cents'] // 100}"
+    except cfg.ConfigError:
+        importe = ""
 
     stripe_url = stripes.get(plan, "")
     keyboard = []
     # La prueba gratis solo se ofrece en los planes con trial (ver TRIAL_PLANS).
-    # Ping Pong: 3 días; el resto: 7.
+    # Los días salen del producto al que pertenece el plan.
     if plan in TRIAL_PLANS:
-        _dias = PINPON_TRIAL_DAYS if plan == "pinpon" else TRIAL_DAYS
+        vertical = cfg.plan(plan)["vertical"]
         keyboard.append([InlineKeyboardButton(
-            f"🎁 Probar gratis {_dias} días",
+            cfg.text("trial.cta_button", product=vertical),
             callback_data=f"trial:{plan}",
         )])
     if stripe_url:
