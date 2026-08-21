@@ -353,3 +353,163 @@ def test_no_arranca_si_el_proveedor_no_contesta(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", falsa)
     with pytest.raises(cfg.ConfigError, match="no responden"):
         cfg.verify_startup(check_payment_links=True)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Bloque global `stats`: rendimiento publicado y política de riesgo
+# ──────────────────────────────────────────────────────────────────────────
+_STATS_CLAVES = ("min_streak_to_show", "reference_odds_live",
+                 "recommended_stake_pct", "max_drawdown_bank_pct",
+                 "min_sample_for_risk")
+
+
+@pytest.mark.parametrize("clave", _STATS_CLAVES)
+def test_stats_expone_la_politica_de_riesgo(clave):
+    assert isinstance(cfg.stats(clave), (int, float))
+
+
+def test_stats_rechaza_una_clave_desconocida():
+    with pytest.raises(cfg.ConfigError):
+        cfg.stats("no_existe")
+
+
+def test_el_umbral_de_racha_es_global_y_no_de_un_producto():
+    """
+    Vivía bajo products.pinpon porque las rachas eran cosa del ping pong. Ahora
+    las publican los cuatro métodos: un umbral por producto serían dos varas de
+    medir, y comparar rachas medidas distinto es tramposo aunque cada número por
+    separado sea cierto.
+    """
+    for vertical in cfg.config()["products"]:
+        metodo = cfg.product(vertical).get("method", {})
+        assert "min_streak_to_show" not in metodo, f"{vertical} reintroduce el umbral"
+
+
+def test_la_cuota_de_referencia_no_es_una_cuota_real():
+    """
+    Es la vara con la que se publica el beneficio de goles y córners (línea
+    entera +1), no la cuota de un pick concreto. Cambiarla reescribe el
+    histórico anunciado, así que el esquema la acota a un rango creíble.
+    """
+    cuota = cfg.stats("reference_odds_live")
+    assert 1.01 < cuota < 5.0
+
+
+def test_el_tope_de_drawdown_deja_bank_de_sobra():
+    """Si el peor bache histórico pudiera llevarse el bank entero, el 'stake
+    máximo' no sería un límite de riesgo sino una invitación a arruinarse."""
+    assert 0 < cfg.stats("max_drawdown_bank_pct") <= 50
+
+
+def test_los_dos_cargadores_dan_el_mismo_stats():
+    """La calculadora de stake corre en el navegador con el cargador JS; el
+    resto del sistema lee el de Python. Si divergen, la web recomienda un stake
+    que el bot no reconocería."""
+    if NODE is None:
+        if os.environ.get("CI"):
+            pytest.fail("node no está disponible en CI; la guarda de paridad no se ejecutaría")
+        pytest.skip("node no está disponible (en CI sería un fallo)")
+
+    guion = (
+        "const fs=require('fs');const pc=require(process.env.PC_JS);"
+        "pc.init({product:JSON.parse(fs.readFileSync(process.env.PC_PRODUCT,'utf8'))});"
+        "const claves=JSON.parse(fs.readFileSync(0,'utf8'));"
+        "process.stdout.write(JSON.stringify(claves.map(k=>pc.stats(k))));"
+    )
+    proceso = subprocess.run(
+        [NODE, "-e", guion],
+        input=json.dumps(list(_STATS_CLAVES)),
+        env={**os.environ, "PC_JS": str(SHARED / "product_config.js"),
+             "PC_PRODUCT": str(SHARED / "product.json")},
+        capture_output=True, text=True, timeout=60, check=True,
+    )
+    assert json.loads(proceso.stdout) == [cfg.stats(k) for k in _STATS_CLAVES]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Calculadora de stake
+# ──────────────────────────────────────────────────────────────────────────
+def test_el_stake_recomendado_es_el_porcentaje_del_bank():
+    pct = cfg.stats("recommended_stake_pct")
+    assert cfg.stake_recomendado(1000) == pytest.approx(1000 * pct / 100)
+
+
+@pytest.mark.parametrize("bank", [0, -1, -1000])
+def test_un_bank_no_positivo_es_un_error(bank):
+    with pytest.raises(cfg.ConfigError):
+        cfg.stake_recomendado(bank)
+    with pytest.raises(cfg.ConfigError):
+        cfg.stake_maximo(bank, 10, 500)
+
+
+def test_el_stake_maximo_sale_del_peor_bache():
+    """Con 1000€ de bank, un tope del 33% y un bache de 10u: 330€/10u = 33€/u."""
+    bank, drawdown = 1000, 10
+    esperado = bank * cfg.stats("max_drawdown_bank_pct") / 100 / drawdown
+    assert cfg.stake_maximo(bank, drawdown, 500) == pytest.approx(esperado)
+
+
+def test_peor_bache_significa_stake_mas_pequeno():
+    """
+    Es la razón de ser del cálculo: dos métodos con el mismo beneficio final no
+    admiten el mismo stake si uno sufrió el triple por el camino.
+    """
+    suave = cfg.stake_maximo(1000, 8, 500)
+    duro = cfg.stake_maximo(1000, 30, 500)
+    assert duro < suave
+
+
+def test_sin_muestra_suficiente_no_hay_stake_maximo():
+    """
+    Con pocos picks el drawdown no dice cuál es el peor bache del método, solo
+    cuál ha sido hasta ahora. Publicar un tope con eso invita a apostar de más.
+    """
+    minimo = cfg.stats("min_sample_for_risk")
+    assert cfg.stake_maximo(1000, 5, minimo - 1) is None
+    assert cfg.stake_maximo(1000, 5, minimo) is not None
+
+
+def test_un_metodo_que_nunca_ha_caido_no_publica_maximo():
+    """Sin bache que medir no hay tope que calcular: dividir por cero daría un
+    stake infinito, que es justo el consejo contrario al que toca."""
+    assert cfg.stake_maximo(1000, 0, 500) is None
+
+
+def test_el_recomendado_nunca_supera_al_maximo_en_un_metodo_normal():
+    """El recomendado es prudente por definición. Si con un drawdown corriente
+    superase al tope de riesgo, la calculadora se contradiría a sí misma."""
+    bank = 1000
+    assert cfg.stake_recomendado(bank) <= cfg.stake_maximo(bank, 10, 500)
+
+
+def test_los_dos_cargadores_calculan_el_mismo_stake():
+    """La calculadora corre en el navegador. Si el JS y el Python no dan lo
+    mismo, la web recomienda una cantidad que el resto del sistema no avala."""
+    if NODE is None:
+        if os.environ.get("CI"):
+            pytest.fail("node no está disponible en CI; la guarda de paridad no se ejecutaría")
+        pytest.skip("node no está disponible (en CI sería un fallo)")
+
+    casos = [(1000, 10, 500), (250, 3.5, 500), (5000, 27.4, 500),
+             (100, 10, 5), (1000, 0, 500)]
+    guion = (
+        "const fs=require('fs');const pc=require(process.env.PC_JS);"
+        "pc.init({product:JSON.parse(fs.readFileSync(process.env.PC_PRODUCT,'utf8'))});"
+        "const cs=JSON.parse(fs.readFileSync(0,'utf8'));"
+        "process.stdout.write(JSON.stringify(cs.map(c=>["
+        "pc.stakeRecomendado(c[0]),pc.stakeMaximo(c[0],c[1],c[2])])));"
+    )
+    proceso = subprocess.run(
+        [NODE, "-e", guion], input=json.dumps(casos),
+        env={**os.environ, "PC_JS": str(SHARED / "product_config.js"),
+             "PC_PRODUCT": str(SHARED / "product.json")},
+        capture_output=True, text=True, timeout=60, check=True,
+    )
+    obtenido = json.loads(proceso.stdout)
+    esperado = [[cfg.stake_recomendado(b), cfg.stake_maximo(b, d, n)] for b, d, n in casos]
+    for caso, (rec_js, max_js), (rec_py, max_py) in zip(casos, obtenido, esperado):
+        assert rec_js == pytest.approx(rec_py), f"stake recomendado difiere en {caso}"
+        if max_py is None:
+            assert max_js is None, f"js publica un tope donde python no lo hace: {caso}"
+        else:
+            assert max_js == pytest.approx(max_py), f"stake máximo difiere en {caso}"
