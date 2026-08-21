@@ -1,6 +1,11 @@
-# Configuración del linter (ruff). Reglas por defecto (E4/E7/E9 + F de
-# pyflakes: nombres indefinidos, imports/variables sin usar, etc.). No se
-# fuerza longitud de línea para no pelear con el estilo existente.
+# Configuración del linter (ruff), idéntica en los tres repos de Erikenobi Picks.
+#
+# El `select` es explícito a propósito. Sin él, ruff usa su conjunto por defecto,
+# y ese conjunto cambia entre versiones: ruff 0.16 lo amplió y puso en rojo un CI
+# que estaba verde con 0.15 sin que cambiara una sola línea de código. Con las
+# reglas escritas aquí, el resultado no depende de qué versión resuelva pip.
+#
+# No se fuerza longitud de línea para no pelear con el estilo existente.
 target-version = "py311"
 line-length = 120
 
