@@ -480,20 +480,25 @@ describir lo que el sistema hace hoy. Los cambios de producto van en un PR
 posterior y separado. Las dos únicas excepciones que sí cambian producción son
 **C10** (aviso legal único) y **C4** (IDs cruzados en el `.env.example`).
 
+**Estado: las doce están cerradas.** C1, C3, C4, C8 y C10 se decidieron una por
+una; las siete restantes se resolvieron por el principio rector (gana el código)
+y quedaron confirmadas en bloque el 21/08/2026. Ninguna de esas siete cambió
+comportamiento: confirmarlas ratificó lo que el sistema ya hacía.
+
 | # | Resolución | Estado |
 |---|---|---|
 | C1 | No hay valor único: bloques `free_tier` **por producto**. Fútbol **4/día** (código). Ping pong **modo `completo`** (default real), `picks_per_day: null` = sin tope. El pie de `promo.py:60` deja de ser cadena fija. `PINPON_FREE_MODO` sale del entorno y pasa a `product.json`. | Decidida |
-| C2 | Trial **7 días** (fútbol) y **3 días** (ping pong), por código. | Resuelta por defecto, pendiente de confirmar |
+| C2 | Trial **7 días** (fútbol) y **3 días** (ping pong), por código. | Confirmada (21/08/2026) |
 | C3 | **24 h**, por código. `.env.example` corregido. | Decidida |
 | C4 | `.env.example` corregido para coincidir con los dos `config.py`, más test de guardia que compara ejemplo y configuración real. | Decidida (cambia producción) |
-| C5 | Nombres canónicos de canal fijados en `product.json` (`premium_pre_over25`, `premium_pre_carlos_mollar`, `premium_pre_general`). | Resuelta por defecto, pendiente de confirmar |
-| C6 | **30 días** (`PLAN_DAYS`), por código. El copy muestra `{plan_interval_days} días`, no "/mes". | Resuelta por defecto, pendiente de confirmar |
-| C7 | **4 métodos** (Stripe, PayPal, Bizum, Revolut), por código. | Resuelta por defecto, pendiente de confirmar |
+| C5 | Nombres canónicos de canal fijados en `product.json` (`premium_pre_over25`, `premium_pre_carlos_mollar`, `premium_pre_general`). | Confirmada (21/08/2026) |
+| C6 | **30 días** (`PLAN_DAYS`), por código. El copy muestra `{plan_interval_days} días`, no "/mes". | Confirmada (21/08/2026) |
+| C7 | **4 métodos** (Stripe, PayPal, Bizum, Revolut), por código. | Confirmada (21/08/2026) |
 | C8 | Dominio canónico **con `www`**. El esquema rechaza cualquier otro. Prioridad alta: el redirect estaba descartando los UTM. | Decidida |
-| C9 | `[13, 18]`, el default de `config.py`, por código. | Resuelta por defecto, pendiente de confirmar |
+| C9 | `[13, 18]`, el default de `config.py`, por código. | Confirmada (21/08/2026) |
 | C10 | Redacción **única** en `copy.es.json` (`legal.full` y `legal.short`), aplicada en todas partes. | Decidida (cambia producción) |
-| C11 | Los porcentajes se leen en vivo; ningún claim de rendimiento entra en `copy.es.json`. | Resuelta por defecto, pendiente de confirmar |
-| C12 | Marca **"Erikenobi Picks"**; el servicio de pago es **"Erikenobi Picks Premium"** (`brand.premium_name`). | Resuelta por defecto, pendiente de confirmar |
+| C11 | Los porcentajes se leen en vivo; ningún claim de rendimiento entra en `copy.es.json`. | Confirmada (21/08/2026) |
+| C12 | Marca **"Erikenobi Picks"**; el servicio de pago es **"Erikenobi Picks Premium"** (`brand.premium_name`). | Confirmada (21/08/2026) |
 
 ### Decisiones estructurales
 
@@ -794,13 +799,28 @@ lo está, entra en la migración como un consumidor más.
 | Identidad | 70+ | 5 (marca) · 23 (bot username) |
 | Ligas / frecuencia / horario | 25 | — |
 
-**12 contradicciones** y **3 decisiones estructurales**, todas resueltas en
-[Resoluciones de la fase 0](#resoluciones-de-la-fase-0). Siete quedan marcadas como
-*resuelta por defecto, pendiente de confirmar*: se han aplicado con el principio
-rector (gana el código) y no cambian comportamiento.
+**12 contradicciones** y **3 decisiones estructurales**, todas resueltas y
+cerradas en [Resoluciones de la fase 0](#resoluciones-de-la-fase-0). Las siete
+que se resolvieron por el principio rector quedaron confirmadas el 21/08/2026.
 
-La fase 1 está hecha: `shared/product.json`, `shared/copy.es.json`,
-`shared/product.schema.json` y `shared/README.md`.
+**Las cinco fases están hechas.** Los tres servicios leen los mismos valores del
+mismo sitio y lo validan al arrancar: si `product.json` no cuadra con su esquema,
+el proceso no arranca. `shared/` viaja sellado y cada repo comprueba su copia en
+CI, así que una divergencia como la que ya ocurrió entre el canónico y la landing
+ahora sale en rojo en vez de pasar desapercibida.
 
-**Bloqueado:** el 301 de `landing-ventas` (D3), a la espera de la comprobación
-manual en el panel de Stripe y en Search Console.
+Solo dos cosas cambiaron comportamiento en producción, ambas por decisión
+explícita: **C4** (IDs de canal cruzados en `.env.example`) y **C10** (aviso legal
+único), más el fallback de estadísticas del bot de pagos, que inventaba
+porcentajes justo cuando la base de datos fallaba.
+
+### Lo que sigue fuera de este trabajo
+
+- **Cambiar un precio exige tocar Stripe y `product.json` el mismo día**, en ese
+  orden. No hay API que preguntar: son Payment Links y el arranque solo comprueba
+  que responden, no que el importe coincida. Procedimiento en `shared/README.md`.
+- **`test_panel_catchup_publica_ayer_si_falta`** falla en `main` del bot de picks
+  desde antes de este trabajo y está excluido por nombre en su CI. Arreglarlo toca
+  lógica de picks.
+- **54 hallazgos de ruff** en el resto del repo del bot de picks. Por eso su lint
+  está acotado a `shared/`.
