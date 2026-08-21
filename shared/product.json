@@ -167,9 +167,9 @@
       },
 
       "free_tier": {
-        "mode": "completo",
-        "picks_per_day": null,
-        "shows_match_names": true,
+        "mode": "reducido",
+        "picks_per_day": 2,
+        "shows_match_names": false,
         "delayed_publication_hours": 0,
         "reveal_minutes_before": 5,
         "modes": {
