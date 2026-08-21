@@ -113,6 +113,53 @@ def product(vertical: str) -> dict:
         raise ConfigError(f"producto desconocido {vertical!r}; hay: {disponibles}") from e
 
 
+def stats(clave: str):
+    """
+    Un valor del bloque global `stats`: cómo se publica el rendimiento y con qué
+    política de riesgo (umbral de racha, cuota de referencia en directo, stake
+    recomendado, tope de drawdown y muestra mínima).
+
+    Es global a propósito. Medir las dos verticales con varas distintas —una
+    racha que se anuncia a partir de 3 aciertos en una y de 5 en la otra— es una
+    comparación tramposa aunque cada número por separado sea cierto.
+    """
+    try:
+        return config()["stats"][clave]
+    except KeyError as e:
+        disponibles = ", ".join(config()["stats"])
+        raise ConfigError(f"stats desconocido {clave!r}; hay: {disponibles}") from e
+
+
+def stake_recomendado(bank: float) -> float:
+    """
+    Stake 1 recomendado: un porcentaje fijo del bank, igual para los cuatro
+    métodos. Conservador a propósito y sin depender de que el pasado se repita.
+    """
+    if bank <= 0:
+        raise ConfigError("el bank debe ser positivo")
+    return bank * float(stats("recommended_stake_pct")) / 100.0
+
+
+def stake_maximo(bank: float, drawdown_u: float, muestra: int) -> float | None:
+    """
+    Stake 1 máximo aplicable a un método, o None si todavía no puede calcularse.
+
+    Sale del PEOR bache histórico real (drawdown, en unidades) y de cuánto bank
+    se acepta perder en él: un método que llegó a caer 30u aguanta un stake
+    mucho menor que uno que cayó 8u, aunque los dos acaben en verde. Es un tope
+    de riesgo, no una recomendación.
+
+    Devuelve None sin muestra suficiente: con pocos picks resueltos el drawdown
+    no dice cuál es el peor bache del método, solo cuál ha sido hasta ahora, y
+    publicar un tope basado en eso invita a apostar de más.
+    """
+    if bank <= 0:
+        raise ConfigError("el bank debe ser positivo")
+    if muestra < int(stats("min_sample_for_risk")) or drawdown_u <= 0:
+        return None
+    return bank * float(stats("max_drawdown_bank_pct")) / 100.0 / float(drawdown_u)
+
+
 def plan(plan_id: str) -> dict:
     """Devuelve el plan (o bundle) con su vertical en la clave 'vertical'."""
     for vertical, datos in config()["products"].items():

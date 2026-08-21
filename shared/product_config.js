@@ -89,6 +89,27 @@
     return p;
   }
 
+  function stats(clave) {
+    var s = config().stats || {};
+    if (!(clave in s)) {
+      throw ConfigError(
+        "stats desconocido '" + clave + "'; hay: " + Object.keys(s).join(", ")
+      );
+    }
+    return s[clave];
+  }
+
+  function stakeRecomendado(bank) {
+    if (!(bank > 0)) throw ConfigError("el bank debe ser positivo");
+    return (bank * Number(stats("recommended_stake_pct"))) / 100;
+  }
+
+  function stakeMaximo(bank, drawdownU, muestra) {
+    if (!(bank > 0)) throw ConfigError("el bank debe ser positivo");
+    if (muestra < Number(stats("min_sample_for_risk")) || !(drawdownU > 0)) return null;
+    return (bank * Number(stats("max_drawdown_bank_pct"))) / 100 / Number(drawdownU);
+  }
+
   function plan(planId) {
     var productos = config().products;
     for (var vertical in productos) {
@@ -320,7 +341,8 @@
   var api = {
     ConfigError: ConfigError,
     init: init, config: config, copy: copy,
-    product: producto, plan: plan, market: mercado,
+    product: producto, plan: plan, market: mercado, stats: stats,
+    stakeRecomendado: stakeRecomendado, stakeMaximo: stakeMaximo,
     freePicksPerDay: freePicksPerDay,
     formatPrice: formatPrice, price: price,
     startParam: startParam, botDeepLink: botDeepLink,
