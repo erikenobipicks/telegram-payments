@@ -23,6 +23,7 @@ from telegram.ext import (
     filters,
 )
 
+from shared import product_config as cfg
 from config import (
     ADMIN_IDS,
     BIZUM,
@@ -2749,15 +2750,15 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if plan == "info":
         await query.edit_message_text(
             "ℹ️ *Cómo funciona*\n\n"
-            "⚽ *GOLES — 20€/mes*\n"
+            f"⚽ *GOLES — {_v2(PRECIO_GOLES)}/{_v2(PLAN_DAYS)} días*\n"
             "Alertas de gol en directo\\.\n\n"
-            "🚩 *CORNERS — 20€/mes*\n"
+            f"🚩 *CORNERS — {_v2(PRECIO_CORNERS)}/{_v2(PLAN_DAYS)} días*\n"
             "Alertas especializadas en mercados de córners en vivo\\.\n\n"
-            "📊 *PREPARTIDO — 20€/mes*\n"
+            f"📊 *PREPARTIDO — {_v2(PRECIO_PRE)}/{_v2(PLAN_DAYS)} días*\n"
             "Análisis manual Over 2\\.5 FT\\. Canal independiente\\.\n\n"
-            "🔥 *COMBO — 30€/mes*\n"
+            f"🔥 *COMBO — {_v2(PRECIO_COMBO)}/{_v2(PLAN_DAYS)} días*\n"
             "Acceso completo a GOLES \\+ CORNERS\\.\n\n"
-            + ("🏓 *PING PONG — 50€/mes*\n"
+            + (f"🏓 *PING PONG — {_v2(PRECIO_PINPON)}/{_v2(PLAN_DAYS)} días*\n"
                "Picks de tenis de mesa en directo con el método ping pong\\. "
                "Canal independiente\\.\n\n" if CANAL_PINPON_ID else "")
             + "📲 *Métodos de pago*\n"
@@ -2800,9 +2801,10 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "El método más rentable, y sabes la hora exacta de cada pick\\.\n"
             "✅ Altísima rentabilidad y franjas concretas: planificas cuándo estar atento\\.\n"
             "⚠️ Es en directo \\(progresión J2/J3\\), pero conoces las horas de antemano\\.\n\n"
-            "💡 *¿Aún dudas?* Pruébalo gratis \\(7 días fútbol/Over 2\\.5, 3 días Ping Pong\\) "
+            f"💡 *¿Aún dudas?* Pruébalo gratis "
+            f"\\({_v2(TRIAL_DAYS)} días fútbol/Over 2\\.5, {_v2(PINPON_TRIAL_DAYS)} días Ping Pong\\) "
             "y decide con tus propios ojos\\.\n\n"
-            "🔞 \\+18 · juego responsable · sin promesas de ganancia\\.",
+            f"{_v2(cfg.legal('short'))}",
             reply_markup=InlineKeyboardMarkup(botones),
             parse_mode="MarkdownV2",
         )
@@ -2816,20 +2818,18 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if stats and (stats.get("globales") or stats.get("ultimo_mes")):
             texto = _formatear_stats_reales(stats)
         else:
-            # Fallback si no hay conexión a la picks DB o aún no hay datos
+            # Fallback si no hay conexión a la picks DB o aún no hay datos.
+            # NO se muestran porcentajes "estimados": eran cifras escritas a
+            # mano y desfasadas, y justo cuando la DB falla es cuando más
+            # engañan. En un servicio que vende transparencia, decir "ahora
+            # mismo no puedo enseñártelos" vale más que un número inventado.
             texto = (
                 "📊 *Rendimiento del servicio*\n\n"
-                "⚽ *GOLES*\n"
-                "Acierto estimado actual: *+70%*\n"
-                "Incluye alertas de gol en directo y prepartido over 2.5.\n\n"
-                "⛳ *CORNERS*\n"
-                "Acierto estimado actual: *+80%*\n"
-                "Alertas en vivo basadas en estadísticas y momentum.\n\n"
-                "🔥 *COMBO*\n"
-                "Rendimiento estimado combinado: *+75%*\n"
-                "Acceso completo a GOLES + CORNERS.\n\n"
-                "⚠️ _Los datos en tiempo real no están disponibles en este momento. "
-                "Inténtalo más tarde._"
+                "⚽ *GOLES* — alertas de gol en directo\n"
+                "⛳ *CORNERS* — alertas en vivo por estadísticas y momentum\n"
+                "🔥 *COMBO* — acceso completo a GOLES \\+ CORNERS\n\n"
+                "⚠️ _Los datos en tiempo real no están disponibles en este momento\\. "
+                "Inténtalo más tarde\\._"
             )
 
         if _pinpon_stats_hay_datos(pp_stats):
@@ -2882,12 +2882,12 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if plan == "goles":
         stats       = await _run_db(get_stats_reales)
         strike_real = _get_strike_tipo(stats, "gol")
-        strike_txt  = f"*{strike_real}* \\(último mes\\)" if strike_real else "*\\+70% estimado*"
+        strike_txt  = f"*{strike_real}* \\(último mes\\)" if strike_real else "_sin datos ahora mismo_"
 
         await query.edit_message_text(
             f"⚽ *PLAN GOLES*\n\n"
             f"📈 Strike: {strike_txt}\n"
-            f"💰 Precio: *{PRECIO_GOLES}/mes*\n\n"
+            f"💰 Precio: *{_v2(PRECIO_GOLES)}/{_v2(PLAN_DAYS)} días*\n\n"
             "✅ Incluye:\n"
             "• Alertas de gol en directo\n"
             "• Selecciones prepartido over 2\\.5\n"
@@ -2903,12 +2903,12 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if plan == "corners":
         stats       = await _run_db(get_stats_reales)
         strike_real = _get_strike_tipo(stats, "corner")
-        strike_txt  = f"*{strike_real}* \\(último mes\\)" if strike_real else "*\\+80% estimado*"
+        strike_txt  = f"*{strike_real}* \\(último mes\\)" if strike_real else "_sin datos ahora mismo_"
 
         await query.edit_message_text(
             f"🚩 *PLAN CORNERS*\n\n"
             f"📈 Strike: {strike_txt}\n"
-            f"💰 Precio: *{PRECIO_CORNERS}/mes*\n\n"
+            f"💰 Precio: *{_v2(PRECIO_CORNERS)}/{_v2(PLAN_DAYS)} días*\n\n"
             "✅ Incluye:\n"
             "• Alertas de córners en vivo\n"
             "• Datos de momentum y presión ofensiva\n"
@@ -2924,7 +2924,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if plan == "pre":
         await query.edit_message_text(
             "📊 *PLAN PREPARTIDO*\n\n"
-            "💰 Precio: *20€/mes*\n\n"
+            f"💰 Precio: *{_v2(PRECIO_PRE)}/{_v2(PLAN_DAYS)} días*\n\n"
             "✅ Incluye:\n"
             "• Análisis manual prepartido\n"
             "• Selecciones Over 2\\.5 FT\n"
@@ -2948,12 +2948,12 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         elif strike_goles or strike_corner:
             strike_txt = f"*{strike_goles or strike_corner}* \\(último mes\\)"
         else:
-            strike_txt = "*\\+75% estimado*"
+            strike_txt = "_sin datos ahora mismo_"
 
         await query.edit_message_text(
             f"🔥 *PLAN COMBO*\n\n"
             f"📈 Strike: {strike_txt}\n"
-            f"💰 Precio: *{PRECIO_COMBO}/mes*\n\n"
+            f"💰 Precio: *{_v2(PRECIO_COMBO)}/{_v2(PLAN_DAYS)} días*\n\n"
             "✅ Incluye acceso completo a:\n"
             "• ⚽ Canal GOLES\n"
             "• 🚩 Canal CORNERS\n\n"
@@ -2972,7 +2972,7 @@ async def seleccionar_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         stats_linea = _pinpon_ficha_stats_v2(pp_stats) if _pinpon_stats_hay_datos(pp_stats) else ""
         await query.edit_message_text(
             "🏓 *PLAN PING PONG*\n\n"
-            f"💰 Precio: *{PRECIO_PINPON}/mes*\n\n"
+            f"💰 Precio: *{_v2(PRECIO_PINPON)}/{_v2(PLAN_DAYS)} días*\n\n"
             f"{stats_linea}"
             "✅ Incluye:\n"
             "• Picks de tenis de mesa en directo con el método ping pong\n"
@@ -5319,13 +5319,13 @@ def _instrucciones_renovacion(plan: str) -> str:
     stripes  = {"goles": STRIPE_GOLES, "corners": STRIPE_CORNERS, "combo": STRIPE_COMBO,
                 "pre": STRIPE_PRE, "pinpon": STRIPE_PINPON}
 
-    precio     = precios.get(plan, "20€")
+    precio     = precios.get(plan) or cfg.price(plan)
     stripe_url = stripes.get(plan, "")
 
     stripe_linea = f"• 💳 Tarjeta (Stripe): {stripe_url}\n" if stripe_url else ""
 
     return (
-        f"\n\n💰 *Precio:* {precio}/mes\n\n"
+        f"\n\n💰 *Precio:* {precio}/{PLAN_DAYS} días\n\n"
         "📋 *Para renovar:*\n"
         f"{stripe_linea}"
         f"• 🅿️ PayPal: {PAYPAL_LINK}\n"
@@ -5619,7 +5619,8 @@ async def check_expirations(context: ContextTypes.DEFAULT_TYPE) -> None:
                     chat_id=int(uid),
                     text=("🏓 Tu acceso a *Ping Pong* ha caducado.\n"
                           "Renuévalo cuando quieras 👉 "
-                          "https://t.me/erikenobi_premiumbot?start=pinpon\n🔞 +18"),
+                          f"{cfg.config()['brand']['bot_url']}?start=pinpon\n"
+                          f"{cfg.legal('short')}"),
                     parse_mode="Markdown",
                 )
             except Exception:
