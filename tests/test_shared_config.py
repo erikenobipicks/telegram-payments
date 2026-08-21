@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 import config
+from shared import product_config as cfg
 
 RAIZ = Path(__file__).resolve().parent.parent
 SHARED = RAIZ / "shared"
@@ -226,3 +227,64 @@ def test_trial_y_acceso_coinciden_con_la_configuracion_actual():
     assert producto["access"]["invite_expiry_hours"] == config.INVITE_EXPIRY_HOURS
     assert producto["access"]["referral"]["referrer_bonus_days"] == config.REFERIDOR_DIAS
     assert producto["timezone"] == config.TIMEZONE
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Módulo 3: el bot de pagos lee de shared/
+# ──────────────────────────────────────────────────────────────────────────
+def test_los_precios_del_bot_salen_del_cargador():
+    import config as c
+    for plan_id, valor in (("goles", c.PRECIO_GOLES), ("corners", c.PRECIO_CORNERS),
+                           ("combo", c.PRECIO_COMBO), ("pre", c.PRECIO_PRE),
+                           ("pinpon", c.PRECIO_PINPON)):
+        assert valor == cfg.price(plan_id)
+
+
+def test_los_botones_de_pago_muestran_el_precio_del_plan():
+    import keyboards
+    etiquetas = [b.text for fila in keyboards.menu_markup().inline_keyboard for b in fila]
+    for plan_id in ("goles", "corners", "combo", "pre", "pinpon"):
+        precio = cfg.price(plan_id)
+        assert any(precio in e for e in etiquetas), f"ningún botón muestra {precio}"
+
+
+def test_el_enlace_de_paypal_lleva_el_importe_del_plan():
+    """El importe iba en la URL desde una tabla de precios paralela."""
+    import keyboards
+    for plan_id in ("goles", "combo", "pinpon"):
+        urls = [b.url for fila in keyboards.pago_markup(plan_id).inline_keyboard
+                for b in fila if b.url and "paypal" in b.url]
+        esperado = str(cfg.plan(plan_id)["amount_cents"] // 100)
+        assert urls and urls[0].endswith("/" + esperado), f"{plan_id}: {urls}"
+
+
+def test_el_boton_de_prueba_usa_los_dias_de_su_producto():
+    import keyboards
+    def etiqueta(plan_id):
+        return keyboards.pago_markup(plan_id).inline_keyboard[0][0].text
+    assert str(cfg.product("futbol")["trial"]["duration_days"]) in etiqueta("goles")
+    assert str(cfg.product("pinpon")["trial"]["duration_days"]) in etiqueta("pinpon")
+
+
+def test_sin_datos_reales_no_se_inventan_porcentajes():
+    """
+    El fallback de estadísticas mostraba +70%/+80%/+75% escritos a mano. Justo
+    cuando la DB falla es cuando más engañan: en un servicio que vende
+    transparencia, decir "ahora no puedo enseñártelos" vale más que un número
+    inventado.
+    """
+    fuente = (RAIZ / "premium_bot.py").read_text(encoding="utf-8")
+    prohibidos = re.findall(r"\+\s*[0-9]{2}%\s*estimad|estimado actual|estimado combinado", fuente)
+    assert not prohibidos, f"porcentajes inventados en el fallback: {prohibidos}"
+
+
+def test_el_escapado_de_markdownv2_sobrevive_a_los_valores_de_shared():
+    """
+    Los mensajes del bot van con parse_mode="MarkdownV2": un '+' o un '.' sin
+    escapar hace que Telegram rechace el mensaje entero.
+    """
+    import premium_bot
+    for valor in (cfg.legal("short"), cfg.price("goles"), str(config.PLAN_DAYS)):
+        escapado = premium_bot._v2(valor)
+        sueltos = re.findall(r"(?<!\\)[_\[\]()~`>#+=|{}.!-]", escapado)
+        assert not sueltos, f"{valor!r} deja sin escapar: {sueltos}"
