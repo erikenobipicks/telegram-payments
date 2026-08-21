@@ -64,10 +64,23 @@ El canónico es **`telegram-payments`**. Los otros dos llevan una copia literal;
 **nadie edita la copia**.
 
 ```
-python -m shared.sync --to    ../erikenobi-telegram-bot   # propagar
-python -m shared.sync --check ../erikenobi-telegram-bot   # guarda (código 1 si difiere)
+python -m shared.sync --to    ../erikenobi-telegram-bot   # propagar (sella y copia)
+python -m shared.sync --check ../erikenobi-telegram-bot   # comparar (código 1 si difiere)
+python -m shared.sync --stamp                             # resellar sin copiar
 python -m shared.sync --print-test                        # test para el repo copia
 ```
+
+`--check` solo sirve con los tres repos clonados al lado, y CI construye cada
+repo por separado. Por eso `shared/` viaja **sellado**: `CHECKSUMS.txt` lleva el
+sha256 de cada fichero, y el test `test_shared_no_ha_divergido_del_canonico`
+comprueba la copia contra su propio sello sin necesitar el canónico delante.
+Editar un fichero de una copia rompe el sello y el CI de ese repo se pone rojo.
+
+En el canónico la misma guarda comprueba lo contrario: que el sello esté al día.
+Un sello obsoleto significa que `shared/` se ha tocado y todavía no se ha
+propagado — y mientras tanto los otros dos servicios siguen anunciando los
+valores viejos. **Cambiar `shared/` no está terminado hasta que los dos `--to`
+están hechos.**
 
 ---
 
