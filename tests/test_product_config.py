@@ -89,13 +89,34 @@ def test_el_mismo_texto_cambia_con_el_producto():
            cfg.text("trial.cta_button", product="pinpon")
 
 
-def test_modo_sin_tope_no_puede_anunciar_un_numero():
+def test_free_reducido_anuncia_su_tope():
     """
-    En modo 'completo' el free de ping pong no tiene límite. Un texto que
-    anuncia "N picks al día" no aplica, y decirlo mal fue el bug original.
+    En modo 'reducido' el free de ping pong tiene tope (2/día): el aviso que
+    anuncia el número SÍ aplica y resuelve el placeholder con el tope real.
+    (El guard de "un modo sin tope no puede anunciar un número" vive en
+    free_picks_per_day, que lanza ConfigError si picks_per_day es null.)
     """
-    with pytest.raises(cfg.ConfigError, match="no tiene tope"):
-        cfg.text("products.pinpon.free.limit_notice_reducido", product="pinpon")
+    aviso = cfg.text("products.pinpon.free.limit_notice_reducido", product="pinpon")
+    assert "{" not in aviso                                  # placeholder resuelto
+    assert str(cfg.free_picks_per_day("pinpon")) in aviso    # anuncia el tope real
+
+
+def test_modo_sin_tope_lanza_al_pedir_un_numero():
+    """
+    El guard sigue vivo a nivel de función: pedir el nº de picks de un modo sin
+    tope (picks_per_day null) lanza ConfigError, para no anunciar un número que
+    no aplica (el bug original). Se comprueba forzando el modo 'completo'.
+    """
+    libre = cfg.product("pinpon")["free_tier"]
+    if libre["modes"]["completo"]["picks_per_day"] is not None:
+        pytest.skip("el modo 'completo' ya no es sin tope")
+    modo_original = libre["mode"]
+    libre["mode"] = "completo"
+    try:
+        with pytest.raises(cfg.ConfigError, match="no tiene tope"):
+            cfg.free_picks_per_day("pinpon")
+    finally:
+        libre["mode"] = modo_original
 
 
 def test_las_referencias_entre_claves_se_resuelven():
