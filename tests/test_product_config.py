@@ -137,16 +137,20 @@ def _claves_de_texto():
     return sorted(recorrer(datos))
 
 
+# Valores que aporta quien llama (no viven en product.json).
+_RUNTIME = {"racha": 5, "emoji_tipo": "⚽"}
+
+
 def _contextos():
     """Todos los contextos con los que tiene sentido resolver un texto."""
     datos = cfg.config()
-    contextos = [{}, {"racha": 5}]
+    contextos = [{}, dict(_RUNTIME)]
     for vertical, producto in datos["products"].items():
-        contextos.append({"product": vertical, "racha": 5})
+        contextos.append({"product": vertical, **_RUNTIME})
         for plan in producto["plans"]:
-            contextos.append({"product": vertical, "plan": plan["id"], "racha": 5})
+            contextos.append({"product": vertical, "plan": plan["id"], **_RUNTIME})
         for mercado in producto.get("markets", []):
-            contextos.append({"product": vertical, "market": mercado["id"], "racha": 5})
+            contextos.append({"product": vertical, "market": mercado["id"], **_RUNTIME})
     return contextos
 
 

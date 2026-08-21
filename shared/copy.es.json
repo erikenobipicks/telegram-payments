@@ -37,12 +37,14 @@
       "reminder_minutes_before"
     ],
     "runtime": [
-      "racha"
+      "racha",
+      "emoji_tipo"
     ],
     "_scopes": "global: siempre. product: solo con producto en contexto — resolve(clave, producto=...). plan: con plan en contexto. market: con mercado en contexto. runtime: valor calculado que aporta quien llama (no vive en product.json); el resolutor lo exige explícitamente.",
     "_copy_refs": "Un marcador con punto, p. ej. {legal.past_performance}, es una referencia a otra clave de este mismo fichero: se resuelve primero y luego se resuelven sus marcadores. Las referencias circulares son un error.",
     "_derived": "Algunos marcadores son valores DERIVADOS, nunca almacenados: responsible_gambling_domain (dominio de compliance.responsible_gambling_url sin esquema ni www), plan_price (de amount_cents + currency), free_hours_range (de free_tier.publication_hours), leagues_list (de products.pinpon.leagues).",
-    "_lista_viva": "Esta lista solo declara los marcadores realmente usados hoy. Al migrar un texto nuevo, añade aquí su marcador y el campo en product.json."
+    "_lista_viva": "Esta lista solo declara los marcadores realmente usados hoy. Al migrar un texto nuevo, añade aquí su marcador y el campo en product.json.",
+    "_html_telegram": "Las claves bajo products.*.free.* y products.*.method.* son mensajes de Telegram y se envían con parse_mode=\"HTML\": las etiquetas <b> forman parte del texto. La web tiene su propio marcado y usa las claves landing.*."
   },
   "legal": {
     "full": "⚠️ Solo para mayores de {min_age} años. Las apuestas implican riesgo de pérdida económica. No garantizamos rentabilidad ni resultados. Juega con responsabilidad. Si crees que puede ser un problema, tienes ayuda en {responsible_gambling_domain}",
@@ -96,21 +98,24 @@
         "limit_notice": "🔒 En el canal free ves hasta {free_picks_per_day} picks al día.",
         "schedule_notice": "Los picks free se publican de {free_hours_range} (hora española).",
         "cta_pick_variants": [
-          "💎 Esto es uno de los {free_picks_per_day} picks gratuitos del día. En PREMIUM salen todos.",
-          "⚡ En FREE llegas tarde y con cuentagotas. En PREMIUM cada alerta te llega al instante y sin límite.",
-          "🔓 Esto es solo la muestra. Los suscriptores reciben TODOS los picks de goles y córners del día.",
-          "📈 Imagina seguir todas las alertas, no solo esta. Eso es PREMIUM.",
-          "💸 Cada pick que no ves en FREE es valor que se queda fuera. En PREMIUM no te pierdes ninguno."
+          "💎 Esto es uno de los <b>{free_picks_per_day} picks gratuitos</b> del día. En PREMIUM salen todos.",
+          "⚡ En FREE llegas tarde y con cuentagotas. En PREMIUM cada alerta te llega <b>al instante y sin límite</b>.",
+          "🔓 Esto es solo la <b>muestra</b>. Los suscriptores reciben TODOS los picks de goles y córners del día.",
+          "📈 Imagina seguir <b>todas</b> las alertas, no solo esta. Eso es PREMIUM.",
+          "💸 Cada pick que no ves en FREE es valor que se queda fuera. En PREMIUM no te pierdes <b>ninguno</b>."
         ],
         "cta_pick_link": "Desbloquear todos los picks",
-        "cta_resumen": "💎 Y esto es solo lo que se publica en el canal gratuito. Los suscriptores PREMIUM han recibido muchos más picks, en directo y sin límite diario.",
-        "cta_resumen_close": "🎁 Compruébalo tú mismo: {trial_days} días GRATIS, sin pagar nada 👇",
+        "cta_resumen": "💎 Y esto es solo lo que se publica en el canal <b>gratuito</b>.\nLos suscriptores PREMIUM han recibido <b>muchos más picks</b>, en directo y sin límite diario.",
+        "cta_resumen_close": "🎁 Compruébalo tú mismo: <b>{trial_days} días GRATIS</b>, sin pagar nada 👇",
         "captacion_variants": [
-          "🎁 Tienes {trial_days} días de PREMIUM GRATIS y aún no los has usado\n\nLo que ves en este canal es una mínima parte. Con PREMIUM recibes:\n⚽ Todos los picks de goles en directo\n🚩 Todos los picks de córners\n📊 Prepartido Over 2.5 FT\n⚡ Al instante, sin límite diario y antes que nadie\n\nNo cuesta nada probarlo 👇",
-          "💎 El canal FREE es solo la punta del iceberg\n\nAquí ves hasta {free_picks_per_day} picks al día. Debajo hay un sistema completo: cada alerta de goles y córners en tiempo real, más el prepartido Over 2.5, llegando sin tope diario.\n\n🎁 Ábrelo con {trial_days} días GRATIS. Si no te convence, lo dejas 👇",
-          "⚡ ¿Te están cuadrando los picks del canal?\n\nPues son la selección más pequeña de lo que sale cada día en PREMIUM. Los suscriptores reciben todas las alertas, antes y sin cuentagotas.\n\n🎁 Tienes {trial_days} días de prueba GRATIS esperándote. Sin tarjeta, sin compromiso 👇"
+          "🎁 <b>Tienes {trial_days} días de PREMIUM GRATIS y aún no los has usado</b>\n\nLo que ves en este canal es una <b>mínima parte</b>. Con PREMIUM recibes:\n⚽ <b>Todos</b> los picks de goles en directo\n🚩 <b>Todos</b> los picks de córners\n📊 Prepartido Over 2.5 FT\n⚡ Al instante, sin límite diario y antes que nadie\n\nNo cuesta nada probarlo 👇",
+          "💎 <b>El canal FREE es solo la punta del iceberg</b>\n\nAquí ves hasta <b>{free_picks_per_day} picks al día</b>. Debajo hay un sistema completo: cada alerta de goles y córners en tiempo real, más el prepartido Over 2.5, llegando <b>sin tope diario</b>.\n\n🎁 Ábrelo con <b>{trial_days} días GRATIS</b>. Si no te convence, lo dejas 👇",
+          "⚡ <b>¿Te están cuadrando los picks del canal?</b>\n\nPues son la selección <b>más pequeña</b> de lo que sale cada día en PREMIUM. Los suscriptores reciben todas las alertas, antes y sin cuentagotas.\n\n🎁 Tienes <b>{trial_days} días de prueba GRATIS</b> esperándote. Sin tarjeta, sin compromiso 👇"
         ],
-        "racha_notice": "🔥 ¡RACHA DE {racha} ACIERTOS SEGUIDOS!\n\nY eso contando solo los picks que se ven en FREE. Los suscriptores PREMIUM están aprovechando la racha entera, sin límite."
+        "racha_notice": "🔥 <b>¡RACHA DE {racha} ACIERTOS SEGUIDOS!</b>\n\n{emoji_tipo} Y eso contando <b>solo</b> los picks que se ven en FREE.\nLos suscriptores PREMIUM están aprovechando la racha <b>entera</b>, sin límite.\n\n🎁 No te quedes fuera: <b>{trial_days} días GRATIS</b> para subirte ahora 👇",
+        "cta_trial_reminder": "🎁 Pruébalo <b>{trial_days} días GRATIS</b> — sin tarjeta, sin compromiso.",
+        "cta_button_trial": "🎁 Probar PREMIUM {trial_days} días GRATIS",
+        "racha_linea": "🔥 Racha del canal: <b>{racha} aciertos seguidos</b>"
       },
       "premium": {
         "no_daily_limit": "Al instante, sin límite diario y antes que nadie."
@@ -168,7 +173,8 @@
         "comparativa_premium_label": "💎 Premium (todos):",
         "cta_premium": "Todos los picks en directo, con avisos y seguimiento, en el PREMIUM 👇",
         "last_free_day_notice": "🏓 AVISO IMPORTANTE — cambios en el canal free\n\nHoy es el último día con TODOS los picks de ping pong gratis. 🎁\n\nA partir de mañana:\n✅ Seguirás teniendo {free_picks_per_day} picks gratis cada día (uno por la mañana y otro por la tarde).\n🔒 El resto de picks pasan al canal PREMIUM.\n\nSi quieres todos los picks en directo, con avisos y seguimiento completo, te esperamos en el premium 👇",
-        "trial_promo": "🎁 {trial_days} días de Ping Pong Premium GRATIS\nPicks en directo, avisos por franja y seguimiento — sin pagar nada por adelantado.\n\n👉 Actívala aquí (una prueba por persona)"
+        "trial_promo": "🎁 {trial_days} días de Ping Pong Premium GRATIS\nPicks en directo, avisos por franja y seguimiento — sin pagar nada por adelantado.\n\n👉 Actívala aquí (una prueba por persona)",
+        "cta_button_trial": "🎁 Probar PING PONG {trial_days} días GRATIS"
       },
       "method": {
         "title": "🏓 ¿Cómo funciona el método Ping Pong?",
