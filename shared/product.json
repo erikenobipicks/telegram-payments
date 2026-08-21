@@ -57,6 +57,14 @@
     "start_param_token_order": ["src", "vrt", "cmp", "cnt"]
   },
 
+  "stats": {
+    "min_streak_to_show": 3,
+    "reference_odds_live": 1.70,
+    "recommended_stake_pct": 1.0,
+    "max_drawdown_bank_pct": 33.0,
+    "min_sample_for_risk": 30
+  },
+
   "products": {
     "futbol": {
       "display_name": "Fútbol",
@@ -162,8 +170,7 @@
         "stake_game_2": "1u",
         "stake_game_3": "3u",
         "bookmakers": "Retabet · Bwin · Bet365 · 1xBet (solo Rep. Checa) · Winamax",
-        "alert_minutes_before": 5,
-        "min_streak_to_show": 3
+        "alert_minutes_before": 5
       },
 
       "free_tier": {

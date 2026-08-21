@@ -5,7 +5,7 @@
   "description": "Fuente única de verdad de precios, límites, identidad y valores legales. Sin secretos: este fichero debe poder publicarse sin riesgo.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "brand", "compliance", "currency", "timezone", "payment_methods", "access", "tracking", "products"],
+  "required": ["version", "brand", "compliance", "currency", "timezone", "payment_methods", "access", "tracking", "stats", "products"],
 
   "$defs": {
     "nonNegativeInt": { "type": "integer", "minimum": 0 },
@@ -228,6 +228,35 @@
       }
     },
 
+    "stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Cómo se publica el rendimiento y con qué política de riesgo. Global a propósito: medir las dos verticales con varas distintas hace tramposa la comparación aunque cada número por separado sea cierto.",
+      "required": ["min_streak_to_show", "reference_odds_live", "recommended_stake_pct", "max_drawdown_bank_pct", "min_sample_for_risk"],
+      "properties": {
+        "min_streak_to_show": {
+          "$ref": "#/$defs/positiveInt",
+          "description": "Aciertos seguidos mínimos para presumir de racha."
+        },
+        "reference_odds_live": {
+          "type": "number", "minimum": 1.01, "maximum": 5.0,
+          "description": "Cuota de referencia con la que se publican las unidades de los métodos en directo (goles y córners, línea entera +1). No es la cuota real de un pick: es la vara con la que se mide el beneficio anunciado, así que cambiarla reescribe el histórico publicado."
+        },
+        "recommended_stake_pct": {
+          "type": "number", "exclusiveMinimum": 0, "maximum": 10,
+          "description": "Stake 1 recomendado, en % del bank."
+        },
+        "max_drawdown_bank_pct": {
+          "type": "number", "exclusiveMinimum": 0, "maximum": 50,
+          "description": "Porción del bank que se acepta perder en el peor bache histórico de un método. De aquí sale el stake 1 máximo aplicable."
+        },
+        "min_sample_for_risk": {
+          "$ref": "#/$defs/positiveInt",
+          "description": "Picks resueltos mínimos para calcular un stake máximo. Por debajo, el drawdown no dice cuál es el peor bache del método, solo cuál ha sido hasta ahora."
+        }
+      }
+    },
+
     "products": {
       "type": "object",
       "additionalProperties": false,
@@ -315,13 +344,12 @@
             "method": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["stake_game_2", "stake_game_3", "bookmakers", "alert_minutes_before", "min_streak_to_show"],
+              "required": ["stake_game_2", "stake_game_3", "bookmakers", "alert_minutes_before"],
               "properties": {
                 "stake_game_2": { "type": "string", "minLength": 1 },
                 "stake_game_3": { "type": "string", "minLength": 1 },
                 "bookmakers": { "type": "string", "minLength": 1 },
-                "alert_minutes_before": { "$ref": "#/$defs/nonNegativeInt" },
-                "min_streak_to_show": { "$ref": "#/$defs/nonNegativeInt" }
+                "alert_minutes_before": { "$ref": "#/$defs/nonNegativeInt" }
               }
             },
             "free_tier": {
